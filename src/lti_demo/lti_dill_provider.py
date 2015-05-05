@@ -39,9 +39,9 @@ class LTIDillProvider(tornado.web.RequestHandler):
         #print(str(postBody))
         #self.write('<!DOCTYPE html><html><body><script>document.getElementById("ltiFrame-i4x-DavidU-DC1-lti-2edb4bca1198435cbaae29e8865b4d54").innerHTML = "Hello iFrame!"</script></body></html>"');    
 
-        self.echoParmsToBrowser(postBodyForm)
+        self.echoParmsToEventDispatcher(postBodyForm)
 
-    def echoParmsToBrowser(self, postBodyForm):
+    def echoParmsToEventDispatcher(self, postBodyForm):
         '''
         Write an HTML form back to the calling browser.
         

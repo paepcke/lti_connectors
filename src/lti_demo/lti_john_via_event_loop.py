@@ -25,6 +25,8 @@ class LTIJohnProvider(tornado.web.RequestHandler):
     http://edx.readthedocs.org/projects/edx-partner-course-staff/en/latest/exercises_tools/lti_component.html
     '''
 
+    eventDispatcherURL = 'http://mono.stanford.edu:6969/ltiResponse'
+
     def post(self):
         '''
         Override the post() method. The
@@ -33,9 +35,9 @@ class LTIJohnProvider(tornado.web.RequestHandler):
         '''
         postBodyForm = self.request.body
         postBodyDict = eval(postBodyForm)
-        self.echoParmsToBrowser(postBodyDict)
+        self.echoParmsToEventDispatcher(postBodyDict)
         
-    def echoParmsToBrowser(self, paramDict):
+    def echoParmsToEventDispatcher(self, paramDict):
         '''
         Write an HTML form back to the calling browser.
         
@@ -44,11 +46,10 @@ class LTIJohnProvider(tornado.web.RequestHandler):
         '''
         paramNames = paramDict.keys()
         paramNames.sort()
-        self.write('<html><body>')
-        self.write('<b>John Module Was Invoked With Parameters:</b><br><br>')
-        for key in paramNames:
-            self.write('<b>%s: </b>%s <br>' % (key, paramDict[key]))
-        self.write("</body></html>")
+        request = httpclient.HTTPRequest(LTIJohnProvider.eventDispatcherURL, method='POST', body=str(paramDict))
+        http_client = httpclient.AsyncHTTPClient()
+        ltiResult = http_client.fetch(request, callback=lambda result: None)
+        print('John: delivered result to event dispatcher: %s' % ltiResult)
         
     @classmethod  
     def makeApp(self):

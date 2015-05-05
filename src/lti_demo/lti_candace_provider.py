@@ -31,9 +31,9 @@ class LTICandaceProvider(tornado.web.RequestHandler):
         '''
         postBodyForm = self.request.arguments
         print(str(postBodyForm))
-        self.echoParmsToBrowser(postBodyForm)
+        self.echoParmsToEventDispatcher(postBodyForm)
         
-    def echoParmsToBrowser(self, postBodyForm):
+    def echoParmsToEventDispatcher(self, postBodyForm):
         '''
         Write an HTML form back to the calling browser.
         
