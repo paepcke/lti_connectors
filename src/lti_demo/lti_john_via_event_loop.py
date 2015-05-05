@@ -1,13 +1,15 @@
 '''
-Created on Apr 29, 2015
+Created on Apr 30, 2015
 
 @author: paepcke
 '''
+
 import tornado.ioloop
 import tornado.web
+from tornado import httpclient 
 
 
-class LTICandaceProvider(tornado.web.RequestHandler):
+class LTIJohnProvider(tornado.web.RequestHandler):
     '''
     This class is a Web service that listens to POST
     requests from OpenEdX. The module simply echoes
@@ -26,26 +28,26 @@ class LTICandaceProvider(tornado.web.RequestHandler):
     def post(self):
         '''
         Override the post() method. The
-        associated form is available as a 
-        dict in self.request.arguments.
+        associated form is expected as a 
+        stringified dict in self.request.arguments.
         '''
-        postBodyForm = self.request.arguments
-        print(str(postBodyForm))
-        self.echoParmsToBrowser(postBodyForm)
+        postBodyForm = self.request.body
+        postBodyDict = eval(postBodyForm)
+        self.echoParmsToBrowser(postBodyDict)
         
-    def echoParmsToBrowser(self, postBodyForm):
+    def echoParmsToBrowser(self, paramDict):
         '''
         Write an HTML form back to the calling browser.
         
         :param postBodyForm: Dict that contains the HTML form attr/val pairs.
         :type postBodyForm: {string : string}
         '''
-        paramNames = postBodyForm.keys()
+        paramNames = paramDict.keys()
         paramNames.sort()
         self.write('<html><body>')
-        self.write('<b>Candace Module Was Invoked With Parameters:</b><br><br>')
+        self.write('<b>John Module Was Invoked With Parameters:</b><br><br>')
         for key in paramNames:
-            self.write('<b>%s: </b>%s<br>' % (key, postBodyForm[key]))
+            self.write('<b>%s: </b>%s <br>' % (key, paramDict[key]))
         self.write("</body></html>")
         
     @classmethod  
@@ -55,12 +57,25 @@ class LTICandaceProvider(tornado.web.RequestHandler):
         called via http://myServer.stanford.edu:<port>/candace
         '''
         application = tornado.web.Application([
-            (r"/candace", LTICandaceProvider),
+            (r"/john", LTIJohnProvider),
             ])
         return application
 
 if __name__ == "__main__":
-    application = LTICandaceProvider.makeApp()
+    application = LTIJohnProvider.makeApp()
     # Run the app on its port:
-    application.listen(7070)
+    application.listen(7072)
+
+    http_client = httpclient.HTTPClient()
+    try:
+        # Register this service with lti_event_dispatcher:
+        urlRequestPart = "providerName=john&providerURL=http://mono.stanford.edu:7072/john"
+        request = httpclient.HTTPRequest("http://mono.stanford.edu:6969/register?%s" % urlRequestPart, method='GET')
+        response = http_client.fetch(request)
+        print(response.body)
+    except httpclient.HTTPError as e:
+        # HTTPError is raised for non-200 responses; the response
+        # can be found in e.response.
+        raise IOError("Error trying to register: " + str(e))    
+    
     tornado.ioloop.IOLoop.instance().start()

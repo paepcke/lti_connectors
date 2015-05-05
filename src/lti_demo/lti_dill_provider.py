@@ -24,6 +24,11 @@ class LTIDillProvider(tornado.web.RequestHandler):
     http://edx.readthedocs.org/projects/edx-partner-course-staff/en/latest/exercises_tools/lti_component.html
     '''
 
+    def get(self):
+        getParms = self.request.arguments
+        self.write("<html><body>GET method was called: %s.</body></html>" %str(getParms))
+
+
     def post(self):
         '''
         Override the post() method. The
@@ -32,6 +37,8 @@ class LTIDillProvider(tornado.web.RequestHandler):
         '''
         postBodyForm = self.request.arguments
         #print(str(postBody))
+        #self.write('<!DOCTYPE html><html><body><script>document.getElementById("ltiFrame-i4x-DavidU-DC1-lti-2edb4bca1198435cbaae29e8865b4d54").innerHTML = "Hello iFrame!"</script></body></html>"');    
+
         self.echoParmsToBrowser(postBodyForm)
 
     def echoParmsToBrowser(self, postBodyForm):
