@@ -5,6 +5,9 @@ Created on Apr 29, 2015
 '''
 import tornado.ioloop
 import tornado.web
+from tornado import httpserver
+
+import ssl 
 
 USE_CENTRAL_EVENT_LOOP = True
 
@@ -68,7 +71,18 @@ class LTIDillProvider(tornado.web.RequestHandler):
         return application
 
 if __name__ == "__main__":
-    application = LTIDillProvider.makeApp() 
+    application = LTIDillProvider.makeApp()
+    # We need an SSL capable HTTP server:
+    # For configuration without a cert, add "cert_reqs"  : ssl.CERT_NONE
+    # to the ssl_options (though I haven't tried it out.):
+
+    http_server = tornado.httpserver.HTTPServer(application,
+                                                ssl_options={"certfile": "/home/paepcke/.ssl/MonoCertSha2Expiration2018/mono_stanford_edu_cert.cer",
+                                                             "keyfile" : "/home/paepcke/.ssl/MonoCertSha2Expiration2018/mono.stanford.edu.key"
+    })
     # Run the app on its port:
-    application.listen(7071)
+    # Instead of application.listen, as in non-SSL
+    # services, the http_server is told to listen:
+    #*****application.listen(7071)
+    http_server.listen(7071)
     tornado.ioloop.IOLoop.instance().start()        
