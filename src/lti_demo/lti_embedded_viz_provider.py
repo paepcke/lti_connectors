@@ -74,15 +74,15 @@ class LTIVizProvider(tornado.web.RequestHandler):
     def makeApp(self):
         '''
         Create the tornado application, making it 
-        called via http://myServer.stanford.edu:<port>/dill
+        called via http://myServer.stanford.edu:<port>/viz
         '''
         application = tornado.web.Application([
-            (r"/dill", LTIVizProvider),
+            (r"/viz", LTIVizProvider),
             ])
         return application
 
 if __name__ == "__main__":
-    application = LTIDillProvider.makeApp()
+    application = LTIVizProvider.makeApp()
     # We need an SSL capable HTTP server:
     # For configuration without a cert, add "cert_reqs"  : ssl.CERT_NONE
     # to the ssl_options (though I haven't tried it out.):
