@@ -28,7 +28,7 @@ class LTIVizProvider(tornado.web.RequestHandler):
     '''
 
     VIZ_CMD =  "<script type='text/javascript' " +\
-               "src='http://infoviz.stanford.edu/javascripts/api/viz_v1.js'>" +\
+               "src='https://infoviz.stanford.edu/javascripts/api/viz_v1.js'>" +\
                "</script>" +\
                "<div class='tableauPlaceholder' style='width: 1362px; height: 742px;'>" +\
                "<object class='tableauViz' width='1362' height='742' style='display:none;'>" +\
