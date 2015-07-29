@@ -12,9 +12,9 @@ USE_CENTRAL_EVENT_LOOP = True
 class LTIVizProvider(tornado.web.RequestHandler):
     '''
    This class is a Web service that listens to POST
-    requests from OpenEdX. The module simply echoes
-    all the parameters that OpenEdx passes in. The
-    service listens on port 7070 on the server it
+    requests from OpenEdX. The module displays
+    a visualization on the Tableau server.
+    The service listens on port 7073 on the server it
     runs on. If running on mono.stanford.edu, the 
     following URL lets you exercise the service:
     https://lagunita.stanford.edu/courses/DavidU/DC1/David_Course/courseware/918c99bd432c4a83ac14e03cbe774fa0/3cdfb888a5bf480a9f17fc0ca1feb53a/2
