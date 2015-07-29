@@ -28,8 +28,8 @@ class LTIVizProvider(tornado.web.RequestHandler):
     VIZ_CMD =  "<script type='text/javascript' " +\
                "src='https://infoviz.stanford.edu/javascripts/api/viz_v1.js'>" +\
                "</script>" +\
-               "<div class='tableauPlaceholder' style='width: 940px; height: 700px;'>" +\
-               "<object class='tableauViz' width='940' height='700' style='display:none;'>" +\
+               "<div class='tableauPlaceholder' style='width: 1024px; height: 800px;'>" +\
+               "<object class='tableauViz' width='1024' height='800' style='display:none;'>" +\
                "<param name='host_url' value='http%3A%2F%2Finfoviz.stanford.edu%2F' />" +\
                "<param name='site_root' value='' />" +\
                "<param name='name' value='datastageVisualizations&#47;HomeworkAttempts' />" +\
