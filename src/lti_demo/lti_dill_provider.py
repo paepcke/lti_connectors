@@ -16,7 +16,7 @@ class LTIDillProvider(tornado.web.RequestHandler):
    This class is a Web service that listens to POST
     requests from OpenEdX. The module simply echoes
     all the parameters that OpenEdx passes in. The
-    service listens on port 7070 on the server it
+    service listens on port 7071 on the server it
     runs on. If running on mono.stanford.edu, the 
     following URL lets you exercise the service:
     https://lagunita.stanford.edu/courses/DavidU/DC1/David_Course/courseware/918c99bd432c4a83ac14e03cbe774fa0/3cdfb888a5bf480a9f17fc0ca1feb53a/2
@@ -25,6 +25,24 @@ class LTIDillProvider(tornado.web.RequestHandler):
     a sandbox course on Lagunita, you can create 
     an LTI component as described at 
     http://edx.readthedocs.org/projects/edx-partner-course-staff/en/latest/exercises_tools/lti_component.html
+    
+    Or: use https://www.hurl.it/ with URL: https://mono.stanford.edu:7071/dill
+         If you use the GET method there, setting parms to foo=10, you should get an 
+         echo that says:
+         <html>
+            <body>GET method was called: {'foo': ['10']}.</body>
+         </html>
+         
+         If you use the POST method with the same parm, you should get
+         <html>
+    		<body>
+    		  <b>Dill Module Was Invoked With Parameters:</b>
+    		  <br>
+    		    <br>
+    		      <b>foo: </b>['10']
+    		      <br>
+            </body>
+    	 </html>
     '''
 
     def get(self):
