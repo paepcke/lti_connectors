@@ -62,8 +62,8 @@ class LTIJohnProvider(tornado.web.RequestHandler):
         '''
         Write an HTML form back to the calling event dispatcher.
         
-        :param postBodyForm: Dict that contains the HTML form attr/val pairs.
-        :type postBodyForm: {string : string}
+        :param postBodyDict: Dict that contains the HTML form attr/val pairs.
+        :type postBodyDict: {string : string}
         '''
         paramNames = paramDict.keys()
         paramNames.sort()

@@ -7,14 +7,16 @@ import tornado.ioloop
 import tornado.web
 from tornado import httpserver
 
+import ssl 
+
 USE_CENTRAL_EVENT_LOOP = True
 
-class LTIVizProvider(tornado.web.RequestHandler):
+class LTIDillProvider(tornado.web.RequestHandler):
     '''
    This class is a Web service that listens to POST
-    requests from OpenEdX. The module displays
-    a visualization on the Tableau server.
-    The service listens on port 7073 on the server it
+    requests from OpenEdX. The module simply echoes
+    all the parameters that OpenEdx passes in. The
+    service listens on port 7071 on the server it
     runs on. If running on mono.stanford.edu, the 
     following URL lets you exercise the service:
     https://lagunita.stanford.edu/courses/DavidU/DC1/David_Course/courseware/918c99bd432c4a83ac14e03cbe774fa0/3cdfb888a5bf480a9f17fc0ca1feb53a/2
@@ -23,20 +25,25 @@ class LTIVizProvider(tornado.web.RequestHandler):
     a sandbox course on Lagunita, you can create 
     an LTI component as described at 
     http://edx.readthedocs.org/projects/edx-partner-course-staff/en/latest/exercises_tools/lti_component.html
+    
+    Or: use https://www.hurl.it/ with URL: https://mono.stanford.edu:7071/dill
+         If you use the GET method there, setting parms to foo=10, you should get an 
+         echo that says:
+         <html>
+            <body>GET method was called: {'foo': ['10']}.</body>
+         </html>
+         
+         If you use the POST method with the same parm, you should get
+         <html>
+    		<body>
+    		  <b>Dill Module Was Invoked With Parameters:</b>
+    		  <br>
+    		    <br>
+    		      <b>foo: </b>['10']
+    		      <br>
+            </body>
+    	 </html>
     '''
-
-    VIZ_CMD =  "<script type='text/javascript' " +\
-               "src='https://infoviz.stanford.edu/javascripts/api/viz_v1.js'>" +\
-               "</script>" +\
-               "<div class='tableauPlaceholder' style='width: 1024px; height: 800px;'>" +\
-               "<object class='tableauViz' width='1024' height='800' style='display:none;'>" +\
-               "<param name='host_url' value='http%3A%2F%2Finfoviz.stanford.edu%2F' />" +\
-               "<param name='site_root' value='' />" +\
-               "<param name='name' value='datastageVisualizations&#47;HomeworkAttempts' />" +\
-               "<param name='tabs' value='no' />" +\
-               "<param name='toolbar' value='yes' />" +\
-               "<param name='showVizHome' value='n' />" +\
-               "</object></div>"     
 
     def get(self):
         getParms = self.request.arguments
@@ -55,32 +62,34 @@ class LTIVizProvider(tornado.web.RequestHandler):
 
         self.echoParmsToEventDispatcher(postBodyForm)
 
-    def echoParmsToEventDispatcher(self, postBodyForm):
+    def echoParmsToEventDispatcher(self, postBodyDict):
         '''
         Write an HTML form back to the calling browser.
         
-        :param postBodyForm: Dict that contains the HTML form attr/val pairs.
-        :type postBodyForm: {string : string}
+        :param postBodyDict: Dict that contains the HTML form attr/val pairs.
+        :type postBodyDict: {string : string}
         '''
-        paramNames = postBodyForm.keys()
+        paramNames = postBodyDict.keys()
         paramNames.sort()
         self.write('<html><body>')
-        self.write(LTIVizProvider.VIZ_CMD)
+        self.write('<b>Dill Module Was Invoked With Parameters:</b><br><br>')
+        for key in paramNames:
+            self.write('<b>%s: </b>%s<br>' % (key, postBodyDict[key]))
         self.write("</body></html>")
         
     @classmethod  
     def makeApp(self):
         '''
         Create the tornado application, making it 
-        called via http://myServer.stanford.edu:<port>/viz
+        called via http://myServer.stanford.edu:<port>/dill
         '''
         application = tornado.web.Application([
-            (r"/viz", LTIVizProvider),
+            (r"/dill", LTIDillProvider),
             ])
         return application
 
 if __name__ == "__main__":
-    application = LTIVizProvider.makeApp()
+    application = LTIDillProvider.makeApp()
     # We need an SSL capable HTTP server:
     # For configuration without a cert, add "cert_reqs"  : ssl.CERT_NONE
     # to the ssl_options (though I haven't tried it out.):
@@ -93,5 +102,5 @@ if __name__ == "__main__":
     # Instead of application.listen, as in non-SSL
     # services, the http_server is told to listen:
     #*****application.listen(7071)
-    http_server.listen(7073)
+    http_server.listen(7071)
     tornado.ioloop.IOLoop.instance().start()        

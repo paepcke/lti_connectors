@@ -33,19 +33,19 @@ class LTICandaceProvider(tornado.web.RequestHandler):
         print(str(postBodyForm))
         self.echoParmsToEventDispatcher(postBodyForm)
         
-    def echoParmsToEventDispatcher(self, postBodyForm):
+    def echoParmsToEventDispatcher(self, postBodyDict):
         '''
         Write an HTML form back to the calling browser.
         
-        :param postBodyForm: Dict that contains the HTML form attr/val pairs.
-        :type postBodyForm: {string : string}
+        :param postBodyDict: Dict that contains the HTML form attr/val pairs.
+        :type postBodyDict: {string : string}
         '''
-        paramNames = postBodyForm.keys()
+        paramNames = postBodyDict.keys()
         paramNames.sort()
         self.write('<html><body>')
         self.write('<b>Candace Module Was Invoked With Parameters:</b><br><br>')
         for key in paramNames:
-            self.write('<b>%s: </b>%s<br>' % (key, postBodyForm[key]))
+            self.write('<b>%s: </b>%s<br>' % (key, postBodyDict[key]))
         self.write("</body></html>")
         
     @classmethod  
