@@ -110,8 +110,6 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         if logFile is None:
             logFile = os.path.join(os.path.dirname(__file__), '../../log/ltischool_log.log')
             
-        self.setupLogging(loggingLevel, logFile)
-        
     # -------------------------------- HTTP Handler ---------
 
     def get(self):
@@ -213,7 +211,7 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
     # -------------------------------- Utilities ---------            
         
     
-    def setupLogging(self, loggingLevel, logFile):
+    def setupLogging(self, loggingLevel, logFile=None):
         if self.loggingInitialized:
             # Remove previous file or console handlers,
             # else we get logging output doubled:
@@ -221,23 +219,14 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
             
         # Set up logging:
         self.logger = logging.getLogger('ltibridge')
-        # Create file handler if requested:
-        if logFile is not None:
-            try:
-                # Ensure file existence and writability:
-                with open(logFile, 'a') as f: #@UnusedVariable
-                    pass
-                handler = logging.FileHandler(logFile)
-            except IOError:
-                print('Could not create log file %s; logging to console.' % logFile)
-                # Create console handler:
-                handler = logging.StreamHandler()
-        else:
-            # Create console handler:
+        if logFile is None:
             handler = logging.StreamHandler()
-        handler.setLevel(loggingLevel)
-        # Add the handler to the logger
+        else:
+            handler = logging.FileHandler(filename=logFile)
+        formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+        handler.setFormatter(formatter)            
         self.logger.addHandler(handler)
+        self.logger.setLevel(loggingLevel)
         self.loggingInitialized = True
  
     def logDebug(self, msg):
@@ -338,6 +327,12 @@ if __name__ == "__main__":
                                                 ssl_options={"certfile": "/home/paepcke/.ssl/MonoCertSha2Expiration2018/mono_stanford_edu_cert.cer",
                                                              "keyfile" : "/home/paepcke/.ssl/MonoCertSha2Expiration2018/mono.stanford.edu.key"
     })
+    
+    # Set up logging; the logger will be a class variable used
+    # by all instances:
+    LTISchoolbusBridge.setupLogging(loggingLevel, logFile)
+        
+    
     
     print('Starting LTI-Schoolbus bridge on port %s' % LTISchoolbusBridge.LTI_PORT)
     
