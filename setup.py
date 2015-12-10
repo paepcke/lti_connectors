@@ -16,6 +16,7 @@ setup(
 			'singledispatch>=3.4.0.3',
 			'backports_abc>=0.4',
 			'certifi>=2015.11.20.1',
+			'minify>=0.1.4',
 			] + test_requirements,
 
     # Unit tests; they are initiated via 'python setup.py test'

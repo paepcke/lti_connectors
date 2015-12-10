@@ -21,6 +21,23 @@ import tornado.ioloop
 
 USE_CENTRAL_EVENT_LOOP = True
 
+# {
+#      "key" : "ltiKey",
+#      "secret" : "ltiSecret",
+#      "bus_topic" :  "studentAction",
+#      "payload" :	    {"event_type": "problem_check",
+# 		      "resource_id": "i4x://HumanitiesSciences/NCP-101/problem/__61",
+# 		      "student_id": "d4dfbbce6c4e9c8a0e036fb4049c0ba3",
+# 		      "answers": {"i4x-HumanitiesSciences-NCP-101-problem-_61_2_1": ["choice_3", "choice_4"]},
+# 		      "result": "False",
+# 		      "course_id": "HumanitiesSciences/NCP-101/OnGoing"
+# 		    }
+# }
+
+
+#*****{"topic" : {"key" : "secret"}
+#*****}
+
 class LTISchoolbusBridge(tornado.web.RequestHandler):
     '''
     Operates on two communication systems at once:
@@ -94,9 +111,10 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
 
     # Remember whether logging has been initialized (class var!):
     loggingInitialized = False
+    logger = None
+        
     
-
-    def initialize(self, key=None, secret=None, logFile=None, loggingLevel=logging.INFO):
+    def initialize(self, key=None, secret=None):
         
         if key is None or secret is None:
             raise ValueError('Both LTI key and LTI secret must be provided to start the server.')
@@ -104,11 +122,7 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         self.key    = key 
         self.secret = secret
 
-        self.logger = None
-        
         self.busAdapter = BusAdapter()
-        if logFile is None:
-            logFile = os.path.join(os.path.dirname(__file__), '../../log/ltischool_log.log')
             
     # -------------------------------- HTTP Handler ---------
 
@@ -143,7 +157,7 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
                 
         self.check_secret(postBodyDict)
             
-        target = postBodyDict.get('target', None)
+        target = postBodyDict.get('bus_topic', None)
         if target is None:
             self.logErr('POST called without target specification: %s' % str(postBodyDict))
             self.returnHTTPError(400, 'Message did not include a target topic: %s' % str(postBodyDict))
@@ -179,8 +193,8 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         
     def returnHTTPError(self, status_code, msg):
         self.clear()
+        self.write("<b>Error: %s</b>" % msg)        
         self.set_status(status_code)
-        self.finish("<html><body>%s</body></html>" % msg)        
 
         # The following, while simple, tries to put msg into the
         # HTTP header, where newlines are illegal. This limitation
@@ -210,36 +224,36 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
     
     # -------------------------------- Utilities ---------            
         
-    
-    def setupLogging(self, loggingLevel, logFile=None):
-        if self.loggingInitialized:
+    @classmethod
+    def setupLogging(cls, loggingLevel, logFile=None):
+        if cls.loggingInitialized:
             # Remove previous file or console handlers,
             # else we get logging output doubled:
-            self.logger.handlers = []
+            cls.logger.handlers = []
             
         # Set up logging:
-        self.logger = logging.getLogger('ltibridge')
+        cls.logger = logging.getLogger('ltibridge')
         if logFile is None:
             handler = logging.StreamHandler()
         else:
             handler = logging.FileHandler(filename=logFile)
         formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
         handler.setFormatter(formatter)            
-        self.logger.addHandler(handler)
-        self.logger.setLevel(loggingLevel)
-        self.loggingInitialized = True
+        cls.logger.addHandler(handler)
+        cls.logger.setLevel(loggingLevel)
+        cls.loggingInitialized = True
  
     def logDebug(self, msg):
-        self.logger.debug(msg)
+        LTISchoolbusBridge.logger.debug(msg)
 
     def logWarn(self, msg):
-        self.logger.warn(msg)
+        LTISchoolbusBridge.logger.warn(msg)
 
     def logInfo(self, msg):
-        self.logger.info(msg)
+        LTISchoolbusBridge.logger.info(msg)
 
     def logErr(self, msg):
-        self.logger.error(msg)
+        LTISchoolbusBridge.logger.error(msg)
         
     @classmethod  
     def makeApp(self, init_parm_dict):
@@ -259,17 +273,28 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog=os.path.basename(sys.argv[0]), formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('-k', '--key',
                         action='store',
-                        help='LTI key. Default looks in $HOME/.ssh/ltiKey.lti. If not found, will prompt for the key.',
+                        help='LTI key. Default looks in $HOME/.ssh/ltibridge.cnf. If not found, will prompt for the key.',
                         default=None)
     parser.add_argument('-s', '--secret',
                         action='store',
-                        help='LTI secret. Default looks in $HOME/.ssh/ltiSecret.lti.  If not found, will prompt for the secret.',
+                        help='LTI secret. Default looks in $HOME/.ssh/ltibridge.cnf.  If not found, will prompt for the secret.',
                         default=None)
-    parser.add_argument('-l', '--logfile', 
-                        help='fully qualified log file name to which info and error messages \n' +\
+    parser.add_argument('-t', '--topic',
+                        action='store',
+                        help='SchoolBus topic to which LTI service has access in $HOME/.ssh/ltibridge.cnf.  If not found, will prompt for the topic.',
+                        default=None)
+    
+    parser.add_argument('-f', '--logfile', 
+                        help='Fully qualified log file name to which info and error messages \n' +\
                              'are directed. Default: stdout.',
                         dest='logfile',
+                        default=os.path.join(os.path.dirname(__file__), '../../log/ltischool_log.log'))
+    parser.add_argument('-l', '--loglevel', 
+                        choices=['critical', 'error', 'warning', 'info', 'debug'],
+                        help='Logging level: one of critical, error, warning, info, debug.',
+                        dest='loglevel',
                         default=None)
+    
 
     args = parser.parse_args();
     
@@ -285,7 +310,7 @@ if __name__ == "__main__":
         else:
             try:
                 # Look for .ssh/ltiKey.lti:
-                with open(os.path.join(currUserHomeDir, '.ssh/ltiKey.lti')) as fd:
+                with open(os.path.join(currUserHomeDir, '.ssh/ltiKey.lti'), 'r') as fd:
                     key = fd.readline().strip()
             except IOError:
                 # No .ssh subdir of user's home, or no ltiKey.lti inside .ssh:
@@ -303,7 +328,7 @@ if __name__ == "__main__":
         else:
             try:
                 # Look for .ssh/ltiSecret.lti:
-                with open(os.path.join(currUserHomeDir, '.ssh/ltiSecret.lti')) as fd:
+                with open(os.path.join(currUserHomeDir, '.ssh/ltiSecret.lti'), 'r') as fd:
                     secret = fd.readline().strip()
             except IOError:
                 # No .ssh subdir of user's home, or no ltiSecret.lti inside .ssh:
@@ -311,11 +336,30 @@ if __name__ == "__main__":
     if secret is None:
         secret = getpass.getpass("Enter the LTI auth secret: ")
 
-
+    if args.loglevel == 'critical':
+        loglevel = logging.CRITICAL
+    elif args.loglevel == 'error':
+        loglevel = logging.ERROR
+    elif args.loglevel == 'warning':
+        loglevel = logging.WARNING
+    elif args.loglevel == 'info':
+        loglevel = logging.INFO
+    elif args.loglevel == 'debug':
+        loglevel = logging.DEBUG
+    else:
+        loglevel = logging.NOTSET
+        
+    # Set up logging; the logger will be a class variable used
+    # by all instances:
+    LTISchoolbusBridge.setupLogging(loggingLevel=loglevel, logFile=args.logfile)
+    
+    # Read the config file, and make it available as a dict:
+    
+    
+    
+    # Tornado application object:    
     application = LTISchoolbusBridge.makeApp({'key' : key,
                                               'secret' : secret,
-                                              'logFile' : args.logfile,
-                                              'loggingLevel' : logging.INFO
                                               }
                                              )
 
@@ -327,12 +371,6 @@ if __name__ == "__main__":
                                                 ssl_options={"certfile": "/home/paepcke/.ssl/MonoCertSha2Expiration2018/mono_stanford_edu_cert.cer",
                                                              "keyfile" : "/home/paepcke/.ssl/MonoCertSha2Expiration2018/mono.stanford.edu.key"
     })
-    
-    # Set up logging; the logger will be a class variable used
-    # by all instances:
-    LTISchoolbusBridge.setupLogging(loggingLevel, logFile)
-        
-    
     
     print('Starting LTI-Schoolbus bridge on port %s' % LTISchoolbusBridge.LTI_PORT)
     
