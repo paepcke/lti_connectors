@@ -13,6 +13,8 @@ from ubuntu_sso.utils.txsecrets import SECRET_CONTENT_TYPE
 
 from redis_bus_python.bus_message import BusMessage
 from redis_bus_python.redis_bus import BusAdapter
+
+import jsmin
 from tornado import httpserver
 from tornado import web
 import tornado
@@ -112,16 +114,10 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
     # Remember whether logging has been initialized (class var!):
     loggingInitialized = False
     logger = None
-        
+    auth_dict = {}        
     
-    def initialize(self, key=None, secret=None):
+    def initialize(self):
         
-        if key is None or secret is None:
-            raise ValueError('Both LTI key and LTI secret must be provided to start the server.')
-        
-        self.key    = key 
-        self.secret = secret
-
         self.busAdapter = BusAdapter()
             
     # -------------------------------- HTTP Handler ---------
@@ -155,13 +151,15 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
             self.returnHTTPError(400, 'Message did not include a proper JSON object %s' % str(postBodyForm))
             return
                 
-        self.check_secret(postBodyDict)
-            
-        target = postBodyDict.get('bus_topic', None)
-        if target is None:
-            self.logErr('POST called without target specification: %s' % str(postBodyDict))
-            self.returnHTTPError(400, 'Message did not include a target topic: %s' % str(postBodyDict))
+        target_topic = postBodyDict.get('bus_topic', None)
+        if target_topic is None:
+            self.logErr('POST called without target_topic specification: %s' % str(postBodyDict))
+            self.returnHTTPError(400, 'Message did not include a target_topic topic: %s' % str(postBodyDict))
             return
+
+        if not self.check_auth(postBodyDict, target_topic):
+            return
+            
             
         payload = postBodyDict.get('payload', None)
         if payload is None:
@@ -169,31 +167,80 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
             self.returnHTTPError(400, 'Message did not include a payload field: %s' % str(postBodyDict))
             return
             
-        self.publish_to_bus(target, payload)
+        self.publish_to_bus(target_topic, payload)
         
-    def check_secret(self, postBodyDict):
+    def check_auth(self, postBodyDict, target_topic):
+        '''
+        Given the payload dictionary and the SchoolBus topic to
+        which the information is to be published, check authentication.
+        Return True if authentication checks out, else return False.
+        If authentication fails for any reason, an appropriate HTTP response
+        header will have been sent. The caller should simply abandon
+        the request for which authentication was being checked.
+        
+        The method expectes LTISchoolbusBridge.auth_dict to be initialized.
+        If the configuration file that underlies the dict does not have
+        an entry for the given topic, auth fails. If the LTI key or LTI secret
+        are absent from postBodyDict, auth fails. If either secret or key
+        in the payload does not match the key/secret in the config file,
+        auth fails. 
+        
+        :param postBodyDict: dictionary parsed from payload JSON
+        :type postBodyDict: {string : string}
+        :param target_topic: SchoolBus topic for which authentication is to be checked
+        :type target_topic: str
+        '''
+        
         try:
-            key = postBodyDict['key']
-            secret = postBodyDict['secret']
+            given_key = postBodyDict['key']
+            given_secret = postBodyDict['secret']
         except KeyError:
+            self.logErr('Either key or secret missing in incoming POST: %s' % str(postBodyDict))
             self.returnHTTPError(400, 'Either key or secret were not included in LTI request: %s' % str(postBodyDict))
-            return
+            return False
         except TypeError:
-            self.returnHTTPError(400, 'POST payload did of LTI request did not form a Python dictionary: %s' % str(postBodyDict))
-            return
+            self.logErr('POST JSON payload of LTI request did not parse into a Python dictionary: %s' % str(postBodyDict))
+            self.returnHTTPError(400, 'POST JSON payload of LTI request did not parse into a Python dictionary: %s' % str(postBodyDict))
+            return False
         
-        if key != self.key:
-            self.returnHTTPError(400, "Key '%s' is incorrect for this LTI provider." % key)
-            return
+        try:
+            # Get sub-dict with secret and key from config file
+            # See class header for config file format:
+            auth_entry = LTISchoolbusBridge.auth_dict[target_topic]
 
-        if secret != self.secret:
-            self.returnHTTPError(400, "Secret '%s' is incorrect for this LTI provider." % secret)
-            return
+            # Compare given key and secret with the key/secret on file
+            # for the target bus topic:            
+            key_on_record = auth_entry['ltiKey'] 
+            if key_on_record != given_key:
+                self.logErr("Key '%s' does not match key for topic '%s' in config file." % (given_key, target_topic))
+                # Required response header field for 401-not authenticated:
+                self.set_header('WWW-Authenticate', 'key/secret')
+                self.returnHTTPError(401, "Service not authorized for bus topic '%s'" % target_topic)
+                return False
 
-        
+            secret_on_record = auth_entry['ltiSecret'] 
+            if secret_on_record != given_secret:
+                self.logErr("Secret '%s' does not match secret for topic '%s' in config file." % (given_secret, target_topic))
+                # Required response header field for 401-not authenticated:
+                self.set_header('WWW-Authenticate', 'key/secret')
+                self.returnHTTPError(401, "Service not authorized for bus topic '%s'" % target_topic)
+                return False
+                
+        except KeyError:
+            # Either no config file entry for target topic, or malformed
+            # config file that does not include both 'ltikey' and 'ltisecret'
+            # JSON fields for given target topic: 
+            self.logErr("Topic '%s' does not have an entry in the config file, or ill-formed config file for that topic." % target_topic)
+            # Required response header field for 401-not authenticated:
+            self.set_header('WWW-Authenticate', 'given_key/given_secret')
+            self.returnHTTPError(401, "Service not authorized for bus topic '%s'" % target_topic)
+            return False
+
+        return True
+
     def returnHTTPError(self, status_code, msg):
         self.clear()
-        self.write("<b>Error: %s</b>" % msg)        
+        self.write("Error: %s" % msg)        
         self.set_status(status_code)
 
         # The following, while simple, tries to put msg into the
@@ -271,19 +318,10 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog=os.path.basename(sys.argv[0]), formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument('-k', '--key',
+    parser.add_argument('-c', '--configfile',
                         action='store',
-                        help='LTI key. Default looks in $HOME/.ssh/ltibridge.cnf. If not found, will prompt for the key.',
+                        help='Full configuration file path. If absent, looks for $HOME/.ssh/ltibridge.cnf',
                         default=None)
-    parser.add_argument('-s', '--secret',
-                        action='store',
-                        help='LTI secret. Default looks in $HOME/.ssh/ltibridge.cnf.  If not found, will prompt for the secret.',
-                        default=None)
-    parser.add_argument('-t', '--topic',
-                        action='store',
-                        help='SchoolBus topic to which LTI service has access in $HOME/.ssh/ltibridge.cnf.  If not found, will prompt for the topic.',
-                        default=None)
-    
     parser.add_argument('-f', '--logfile', 
                         help='Fully qualified log file name to which info and error messages \n' +\
                              'are directed. Default: stdout.',
@@ -298,43 +336,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args();
     
-    # Key provided? If yes, use it, else
-    # look in $HOME/.ssh/ltiKey.lti. If that
-    # fails, prompt for key:
-    key = args.key 
-    if key is None:
-        # Try to find pwd in specified user's $HOME/.ssh/ltiKey.lti
-        currUserHomeDir = os.getenv('HOME')
-        if currUserHomeDir is None:
-            key = None
-        else:
-            try:
-                # Look for .ssh/ltiKey.lti:
-                with open(os.path.join(currUserHomeDir, '.ssh/ltiKey.lti'), 'r') as fd:
-                    key = fd.readline().strip()
-            except IOError:
-                # No .ssh subdir of user's home, or no ltiKey.lti inside .ssh:
-                key = None
-    if key is None:
-        key = getpass.getpass("Enter the LTI auth key: ")
-
-    # Same for the secret:
-    secret = args.secret 
-    if secret is None:
-        # Try to find pwd in specified user's $HOME/.ssh/ltiSecret.lti
-        currUserHomeDir = os.getenv('HOME')
-        if currUserHomeDir is None:
-            secret = None
-        else:
-            try:
-                # Look for .ssh/ltiSecret.lti:
-                with open(os.path.join(currUserHomeDir, '.ssh/ltiSecret.lti'), 'r') as fd:
-                    secret = fd.readline().strip()
-            except IOError:
-                # No .ssh subdir of user's home, or no ltiSecret.lti inside .ssh:
-                secret = None
-    if secret is None:
-        secret = getpass.getpass("Enter the LTI auth secret: ")
 
     if args.loglevel == 'critical':
         loglevel = logging.CRITICAL
@@ -354,15 +355,26 @@ if __name__ == "__main__":
     LTISchoolbusBridge.setupLogging(loggingLevel=loglevel, logFile=args.logfile)
     
     # Read the config file, and make it available as a dict:
+    configfile = args.configfile
+    if configfile is None:
+        configfile = os.path.join(os.getenv('HOME'), '.ssh/ltibridge.cnf')
     
+    try:
+        with open(configfile, 'r') as conf_fd:
+            # Use jsmin to remove any C/C++ comments from the
+            # config file:
+            LTISchoolbusBridge.auth_dict = json.loads(jsmin.jsmin(conf_fd.read()))
+    except IOError:
+        print('No configuration file found at %s' % configfile)
+        sys.exit()
+    except ValueError as e:
+        print("Bad confiuration file syntax: %s" % `e`)
+        sys.exit()
     
+    # Tornado application object (empty keyword parms dict):    
     
-    # Tornado application object:    
-    application = LTISchoolbusBridge.makeApp({'key' : key,
-                                              'secret' : secret,
-                                              }
-                                             )
-
+    application = LTISchoolbusBridge.makeApp({})
+    
     # We need an SSL capable HTTP server:
     # For configuration without a cert, add "cert_reqs"  : ssl.CERT_NONE
     # to the ssl_options (though I haven't tried it out.):
