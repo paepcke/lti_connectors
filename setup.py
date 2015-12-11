@@ -17,6 +17,8 @@ setup(
 			'backports_abc>=0.4',
 			'certifi>=2015.11.20.1',
 			'minify>=0.1.4',
+			'requests>=2.8.1',
+			'jsonfiledict>=0.2.post1',
 			] + test_requirements,
 
     # Unit tests; they are initiated via 'python setup.py test'

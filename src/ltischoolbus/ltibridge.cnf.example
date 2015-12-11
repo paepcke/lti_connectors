@@ -1,0 +1,34 @@
+/* Config file for ltibridge, the connection between LTI and 
+   the SchoolBus. Syntax is JSON, though C/C++ style comments
+   are allowed. Each entry describes access authentication and 
+   information for one LTI service that wishes to interact
+   with one particular SchoolBus topic. I.e. if a services
+   is to use two topics, both must have a config entry,
+   though the key and secret are allowed to be identical.
+
+   Required are the Schoolbus topic, and LTI key and secret.
+   Further options may be added in the future.
+
+   Format for each entry:
+
+          <schoolbus topic>  : {"ltikey"     : <the LTI key string>,
+	   	  	        "ltisecret"  : <the LTI secret string>
+			       }
+
+   The location of this file may be specified when starting the 
+   lti_schoolbus_bridge.p service by using the -c/--configfile CLI option.
+   Without this option the service expects a file called ltibridge.cnf in
+   $HOME/.ssh, where $HOME is the home directory of the user under whose
+   UID the service is being started.
+*/
+
+{
+    // For OLI in Lagunita:
+    "studentAction"    : {"ltiKey"    : "myLtiKey",
+    		          "ltiSecret" : "myLtiSecret"
+		          },
+    // For some other service:
+    "studentReprimand" : {"ltiKey"    : "reprimandKey",
+		          "ltiSecret" : "reprimandSecret"
+  	   		 }
+}

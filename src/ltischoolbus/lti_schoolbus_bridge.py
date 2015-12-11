@@ -4,6 +4,7 @@ Created on Apr 29, 2015
 @author: paepcke
 '''
 import argparse
+import functools
 import getpass
 import json
 import logging
@@ -11,15 +12,19 @@ import os
 import sys
 from ubuntu_sso.utils.txsecrets import SECRET_CONTENT_TYPE
 
+import jsmin
+import requests
 from redis_bus_python.bus_message import BusMessage
 from redis_bus_python.redis_bus import BusAdapter
-
-import jsmin
 from tornado import httpserver
 from tornado import web
 import tornado
 import tornado.ioloop
+from requests.exceptions import ConnectionError
 
+# TODO: - Switch subscribe/unsubscribe from GET to POST so that key/secret can be included
+#       - Initialize the subscription jsonfiledict in __main__.
+#       - More in-method comments
 
 USE_CENTRAL_EVENT_LOOP = True
 
@@ -37,9 +42,6 @@ USE_CENTRAL_EVENT_LOOP = True
 # }
 
 
-#*****{"topic" : {"key" : "secret"}
-#*****}
-
 class LTISchoolbusBridge(tornado.web.RequestHandler):
     '''
     Operates on two communication systems at once:
@@ -48,15 +50,24 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
     to be LTI protocol. Contents of POST requests are
     forwarded by being published to the SchoolBus.
     
-    Information flow in the reverse direction is not
-    implemented. Once added it should likely follow
-    LTI 1.1 conventions (see https://canvas.instructure.com/doc/api/file.assignment_tools.html).
+    Information flow in the reverse direction requires
+    the LTI consumer to supply a delivery URL where it
+    is ready to receive POSTs. The POST bodys will have
+    this format:
+            {
+                "time"   : "ISO time string",
+                "topic"  : "SchoolBus topic of bus message",
+                "payload": "message's 'content' field"
+            }    
+    
+    TODO: check against LTI 1.1 conventions 
+           (see https://canvas.instructure.com/doc/api/file.assignment_tools.html).    
     
     The Web service that handles POST requests from 
     an LTI consumer listens on port LTI_PORT. This 
     constant is a class variable; change to taste.
     
-    Expected format from LTI is:
+    Expected format from LTI consumer is:
          {
             'key'         : <lti-key>,
             'secret'      : <lti-secret>
@@ -88,25 +99,14 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
 		      'course_id': 'HumanitiesSciences/NCP-101/OnGoing',
             }
         }
+        
+    Authentication is controlled by a config file. See file ltibridge.cnf.example
+    of this distribution for the format of this file.
     
-    If running on mono.stanford.edu, the 
-    following URL lets you exercise the service:
-    https://lagunita.stanford.edu/courses/DavidU/DC1/David_Course/courseware/918c99bd432c4a83ac14e03cbe774fa0/3cdfb888a5bf480a9f17fc0ca1feb53a/2
-
-    If you run it on your own server, and you have
-    a sandbox course on Lagunita, you can create 
-    an LTI component as described at 
-    http://edx.readthedocs.org/projects/edx-partner-course-staff/en/latest/exercises_tools/lti_component.html
+    To test, you can use https://www.hurl.it/ with URL: 
+       https://yourServer.edu:7075/schoolbus 
+    replacing 7075 with the value of LTI_PORT in your installation.
     
-    Or: use https://www.hurl.it/ with URL: https://mono.stanford.edu:7075/schoolbus (replace
-        7075 with the value of LTI_PORT):
-         If you use the GET method there, setting parms to foo=10, you should get an 
-         echo that says:
-         <html>
-            <body>GET method was called: {'foo': ['10']}.</body>
-         </html>
-         
-         If you use the POST method with the same parm, you should get nothing back.
     '''
 
     LTI_PORT = 7075
@@ -118,25 +118,46 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
     
     def initialize(self):
         
+        # Create a BusAdapter instance that handles all
+        # interactions with the SchoolBus:
         self.busAdapter = BusAdapter()
             
     # -------------------------------- HTTP Handler ---------
 
     def get(self):
         '''
-        GET requests currently don't do anything. But we
-        could use them for info exchange outside of the LTI
-        framework.
+        GET is used for the following:
+            - Subscribe to SchoolBus topic: http://.../?action=subscribe&topic=myTopic&url=myDeliveryUrl
+            - Unsubscribe from a SchoolBus topic: http://.../?action=unsubscribe&topic=myTopic&url=myDeliveryUrl
         '''
+        
         getParms = self.request.arguments
-        self.write("<html><body>GET method was called: %s.</body></html>" %str(getParms))
-
+        #self.write("<html><body>GET method was called: %s.</body></html>" %str(getParms))
+        try:
+            action = getParms['action']
+            topic  = getParms['topic']
+            url    = getParms['url']
+        except KeyError:
+            self.logErr('Bad GET request; missing query key/val: %s' % str(getParms))
+            self.returnHTTPError(400, "GET requests must include key/value pairs 'action, 'topic', and 'url'")
+            return
+        if action == 'subscribe':
+            self.lti_subscribe(topic, url)
+        elif action == 'unsubscribe':
+            self.lti_unsubscribe(topic, url)
+        else:
+            self.logErr('Bad GET request; non-implemented action: %s' % action)
+            self.returnHTTPError(501, "Only methods 'subscribe' and 'unsubscribe' are implemented; '%s' is not." % action)
+            return
 
     def post(self):
         '''
         Override the post() method. The
         associated form is available as a 
         dict in self.request.arguments.
+        
+        Logs errors: Bad json in the POST body, missing SchoolBus topic, missing payload. 
+        
         '''
         postBodyForm = self.request.body
         #print(str(postBody))
@@ -145,6 +166,7 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         #self.echoParmsToEventDispatcher(postBodyForm)
         
         try:
+            # Turn POST body JSON into a dict:
             postBodyDict = json.loads(str(postBodyForm))
         except ValueError:
             self.logErr('POST called with improper JSON: %s' % str(postBodyForm))            
@@ -156,6 +178,9 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
             self.logErr('POST called without target_topic specification: %s' % str(postBodyDict))
             self.returnHTTPError(400, 'Message did not include a target_topic topic: %s' % str(postBodyDict))
             return
+
+        # Look for LTI key and secret in the dict, and
+        # check it against the config file:
 
         if not self.check_auth(postBodyDict, target_topic):
             return
@@ -183,7 +208,7 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         an entry for the given topic, auth fails. If the LTI key or LTI secret
         are absent from postBodyDict, auth fails. If either secret or key
         in the payload does not match the key/secret in the config file,
-        auth fails. 
+        auth fails. See class comment for config file format.
         
         :param postBodyDict: dictionary parsed from payload JSON
         :type postBodyDict: {string : string}
@@ -239,6 +264,16 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         return True
 
     def returnHTTPError(self, status_code, msg):
+        '''
+        Tells tornado that an error occurred in the processing of a
+        POST or GET request.
+        
+        :param status_code: HTTP return code
+        :type status_code: int
+        :param msg: Arbitrary message that will appear in the browser's window (i.e. not in the header).
+                    Therefore may contain newlines or any other chars.
+        :type msg: str
+        '''
         self.clear()
         self.write("Error: %s" % msg)        
         self.set_status(status_code)
@@ -250,7 +285,7 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
 
     def echoParmsToEventDispatcher(self, postBodyDict):
         '''
-        For testiung only: Write an HTML form back to the calling browser.
+        For testing only: Write an HTML form back to the calling browser.
         
         :param postBodyDict: Dict that contains the HTML form attr/val pairs.
         :type postBodyDict: {string : string}
@@ -266,9 +301,109 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
     # -------------------------------- SchoolBus Handler ---------
     
     def publish_to_bus(self, topic, payload):
+        '''
+        Given a topic and an arbitrary string, publishes the
+        string to the SchoolBus.
+        
+        :param topic: topic to which message will be published
+        :type topic: str
+        :param payload: will be placed in the bus message content field.
+        :type payload: str
+        '''
         bus_message = BusMessage(content=payload, topicName=topic,)
         self.busAdapter.publish(bus_message)
     
+    def lti_subscribe(self, topic, url):
+        '''
+        Allows LTI consumers to subscribe to SchoolBus topics. 
+        The consumer must supply a URL to which arriving messages
+        and their time stamps are POSTed. It is legal to subscribe
+        to the same topic multiple times with the same URL. All 
+        URLs will be POSTed to with incoming messages. It is safe
+        to subscribe to the same topic with the same URL multiple
+        times. This event is a no-op. It is also legal to have message
+        of multiple topics delivered to the same consumer URL.
+        
+        :param topic: the SchoolBus topic to listen to
+        :type topic: str
+        :param url: URI where consumer is ready to receive POSTs with incoming messages
+        :type url: str
+        '''
+        self.busAdapter.subscribeToTopic(topic, functools.partial(self.to_lti_transmitter))
+        try:
+            # Do we already have this URL subscribed for this topic?
+            LTISchoolbusBridge.lti_subscriptions[topic].index(url)
+        except KeyError:
+            # Nobody is currently subscribed to the topic:
+            LTISchoolbusBridge.lti_subscriptions[topic] = [url]
+            LTISchoolbusBridge.lti_subscriptions.save()
+            return
+        except ValueError:
+            # There are subscriptions to the topic, but url is not among them;
+            # this is the 'normal' case:
+            LTISchoolbusBridge.lti_subscriptions[topic].append(url)
+            LTISchoolbusBridge.lti_subscriptions.save()
+            return
+        
+    def lti_unsubscribe(self, topic, url):
+        '''
+        Allows LTI consumers to unsubscribe from a SchoolBus topic.
+        It is safe to unsubscribe from a topic/url without first
+        subscribing. This event is a no-op. If the given topic
+        is subscribed to with multiple delivery URLs, only the
+        given URL will no longer receive messages on that topic.
+        
+        :param topic: topic from which to unsubscribe
+        :type topic: str
+        :param url: delivery URI associated with the topic 
+        :type url: str
+        '''
+        self.busAdapter.unsubscribeFromTopic(topic)
+        try:
+            LTISchoolbusBridge.lti_subscriptions[topic].remove(url)
+            LTISchoolbusBridge.lti_subscriptions.save()
+        except (KeyError, ValueError):
+            # Subscription wasn't in our records:
+            pass
+        
+    def to_lti_transmitter(self, bus_msg):
+        '''
+        Called by BusAdapter with incoming messages to which at least
+        one LTI consumer has subscribed. Delivers the message to
+        all URLs that were provided in previous calls to lti_subscribe().
+        Delivery will be JSON:
+            {
+                "time"   : "ISO time string",
+                "topic"  : "SchoolBus topic of bus message",
+                "payload": "message's 'content' field"
+            }
+        Logged errors: 
+             - no subscribers for topic: unsubscribes from the topic as side effect
+             - URL is not reachable, so POST failed
+             - HTTP-based error returned during POST
+        
+        :param bus_msg: the incoming SchoolBus message
+        :type bus_msg: BusMessage
+        '''
+        topic = bus_msg.topicName()
+        try:
+            subscriber_urls = LTISchoolbusBridge.subsciber_dict[topic]
+        except KeyError:
+            self.logErr("Server received msg for topic '%s', but subscriber dict has no subscribers for that topic." % topic)
+            self.busAdapter.unsubscribeFromTopic(topic)
+            return
+        msg_to_post = '{"time" : "%s", "topic" : "%s", "payload" : "%s"}' % (bus_msg.isoTime(), topic, bus_msg.content)
+        for lti_subscriber_url in subscriber_urls:
+            try:
+                r = requests.post(lti_subscriber_url, msg_to_post)
+            except ConnectionError:
+                self.logErr('Bad delivery URL %s for topic %s' % (lti_subscriber_url, topic))
+                continue
+            (status, reason) = (r.status_code, r.reason)
+            if status != '200':
+                self.logErr("Failed to deliver bus message to subscriber %s; %s: %s" % (lti_subscriber_url, status, reason))
+            
+            
     # -------------------------------- Utilities ---------            
         
     @classmethod
