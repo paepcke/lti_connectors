@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<body>
+<h1>Welcome to the LTI-to-SchoolBus Bridge</h1
+
+LTI-to-SchoolBus bridges are servers that connect Learning Technology
+Interchange (LTI) consumers with a SchoolBus (see figure).
+<br>
+<img src="lti_to_schoolbus.png">
+<br>
+Each bridge listens on a dedicated port. LTI consumers may execute
+any of three actions by POSTing an HTTP request to the bridge. Options
+are<br>
+<ul>
+  <li>Publish to a SchoolBus topic</li>
+  <li>Subscribe to a SchoolBus topic</li>
+  <li>Unsubscribe from a SchoolBus topic</li>
+</ul>
+The figure shows examples of a request as it should appear in the POST
+body. If LTI consumers subscribes to a topic, they need to provide a
+URL to which the bridge will POST messages coming from the bus.
+The figure shows an example of what to expect from such a message
+delivery in the POST body.
+</body>
+</html>
+

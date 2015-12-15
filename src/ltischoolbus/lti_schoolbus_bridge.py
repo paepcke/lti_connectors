@@ -5,32 +5,32 @@ Created on Apr 29, 2015
 '''
 import argparse
 import functools
-import getpass
 import json
 import logging
 import os
+import requests
+from requests.exceptions import ConnectionError
 import sys
-from ubuntu_sso.utils.txsecrets import SECRET_CONTENT_TYPE
+import urlparse
 
 import jsmin
-import requests
 from redis_bus_python.bus_message import BusMessage
 from redis_bus_python.redis_bus import BusAdapter
 from tornado import httpserver
 from tornado import web
 import tornado
 import tornado.ioloop
-from requests.exceptions import ConnectionError
+
 
 # TODO: - Switch subscribe/unsubscribe from GET to POST so that key/secret can be included
 #       - Initialize the subscription jsonfiledict in __main__.
 #       - More in-method comments
-
 USE_CENTRAL_EVENT_LOOP = True
 
 # {
 #      "key" : "ltiKey",
 #      "secret" : "ltiSecret",
+#      "action" : "publish",
 #      "bus_topic" :  "studentAction",
 #      "payload" :	    {"event_type": "problem_check",
 # 		      "resource_id": "i4x://HumanitiesSciences/NCP-101/problem/__61",
@@ -69,36 +69,49 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
     
     Expected format from LTI consumer is:
          {
-            'key'         : <lti-key>,
-            'secret'      : <lti-secret>
-            'bus_topic'   : <schoolbus topic>
-            'payload'     :
+            "key"         : <lti-key>,
+            "secret"      : <lti-secret>,
+            "action"      : {"publish" | "subscribe" | "unsubscribe"},
+            "bus_topic"   : <schoolbus topic>>
+            "payload"     :
             {
-            'course_id': course_id,
-            'resource_id': problem_id,
-            'student_id': anonymous_id_for_user(user, None),
-            'answers': answers,
-            'result': is_correct,
-            'event_type': event_type,
-            'target_topic' : schoolbus_topic
+            "course_id": course_id,
+            "resource_id": problem_id,
+            "student_id": anonymous_id_for_user(user, None),
+            "answers": answers,
+            "result": is_correct,
+            "event_type": event_type,
+            "target_topic" : schoolbus_topic
             }
         }
         
-     An example payload before it gets urlencoded:
+     An example payload for action publish:
 
         {
-            'key' : 'myLtiKey',
-            'secret' : 'myLtiSecret',
-            'bus_topic' : 'studentAction',
-            'payload' :
-		    {'event_type': 'problem_check',
-		      'resource_id': 'i4x://HumanitiesSciences/NCP-101/problem/__61',
-		      'student_id': 'd4dfbbce6c4e9c8a0e036fb4049c0ba3',
-		      'answers': {'i4x-HumanitiesSciences-NCP-101-problem-_61_2_1': ['choice_3', 'choice_4']},
-		      'result': False,
-		      'course_id': 'HumanitiesSciences/NCP-101/OnGoing',
+            "key" : "myLtiKey",
+            "secret" : "myLtiSecret",
+            "action" : "publish,
+            "bus_topic" : "studentAction",
+            "payload" :
+		    {"event_type": "problem_check",
+		      "resource_id": "i4x://HumanitiesSciences/NCP-101/problem/__61",
+		      "student_id": "d4dfbbce6c4e9c8a0e036fb4049c0ba3",
+		      "answers": {"i4x-HumanitiesSciences-NCP-101-problem-_61_2_1": ["choice_3", "choice_4"]},
+		      "result": False,
+		      "course_id": "HumanitiesSciences/NCP-101/OnGoing",
             }
         }
+        
+    Example for subscribe:
+        {
+            "key" : "myLtiKey",
+            "secret" : "myLtiSecret",
+            "action" : "publish,
+            "bus_topic" : "studentAction",
+            "payload" :
+		    "delivery_url" : "https://myMachine.myDomain.edu"
+        }    
+    
         
     Authentication is controlled by a config file. See file ltibridge.cnf.example
     of this distribution for the format of this file.
@@ -124,31 +137,19 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
             
     # -------------------------------- HTTP Handler ---------
 
-    def get(self):
-        '''
-        GET is used for the following:
-            - Subscribe to SchoolBus topic: http://.../?action=subscribe&topic=myTopic&url=myDeliveryUrl
-            - Unsubscribe from a SchoolBus topic: http://.../?action=unsubscribe&topic=myTopic&url=myDeliveryUrl
-        '''
-        
-        getParms = self.request.arguments
-        #self.write("<html><body>GET method was called: %s.</body></html>" %str(getParms))
-        try:
-            action = getParms['action']
-            topic  = getParms['topic']
-            url    = getParms['url']
-        except KeyError:
-            self.logErr('Bad GET request; missing query key/val: %s' % str(getParms))
-            self.returnHTTPError(400, "GET requests must include key/value pairs 'action, 'topic', and 'url'")
-            return
-        if action == 'subscribe':
-            self.lti_subscribe(topic, url)
-        elif action == 'unsubscribe':
-            self.lti_unsubscribe(topic, url)
-        else:
-            self.logErr('Bad GET request; non-implemented action: %s' % action)
-            self.returnHTTPError(501, "Only methods 'subscribe' and 'unsubscribe' are implemented; '%s' is not." % action)
-            return
+#     def get(self):
+#         self.render("static_html/index.html")
+
+#     def get(self):
+#         '''
+#         GET is used for the following:
+#             - Subscribe to SchoolBus topic: http://.../?action=subscribe&topic=myTopic&url=myDeliveryUrl
+#             - Unsubscribe from a SchoolBus topic: http://.../?action=unsubscribe&topic=myTopic&url=myDeliveryUrl
+#         '''
+#         
+#         getParms = self.request.arguments
+#         #self.write("<html><body>GET method was called: %s.</body></html>" %str(getParms))
+#         self.returnHTTPError(501, 'The GET method is not implemented')
 
     def post(self):
         '''
@@ -172,11 +173,21 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
             self.logErr('POST called with improper JSON: %s' % str(postBodyForm))            
             self.returnHTTPError(400, 'Message did not include a proper JSON object %s' % str(postBodyForm))
             return
+
+        # Does msg contain the required 'action' field?
+        action = postBodyDict.get('action', None)
+        if action is None:
+            self.logErr("POST called without action field: '$s'" % str(postBodyDict))
+            self.returnHTTPError(400, 'Message did not include an action field: %s' % str(postBodyDict))
+            return
+        # Normalize capitalization:
+        action = action.lower()
                 
+        # Is the required bus_topic field present?                
         target_topic = postBodyDict.get('bus_topic', None)
         if target_topic is None:
             self.logErr('POST called without target_topic specification: %s' % str(postBodyDict))
-            self.returnHTTPError(400, 'Message did not include a target_topic topic: %s' % str(postBodyDict))
+            self.returnHTTPError(400, 'Message did not include a target_topic field: %s' % str(postBodyDict))
             return
 
         # Look for LTI key and secret in the dict, and
@@ -191,8 +202,45 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
             self.logErr('POST called without payload field: %s' % str(postBodyDict))
             self.returnHTTPError(400, 'Message did not include a payload field: %s' % str(postBodyDict))
             return
+        
+        # Finally, seems to be a legal msg; process the various actions:
+        if action == 'publish':
+            self.publish_to_bus(target_topic, payload)
+            return
+        elif action in ['subscribe', 'unsubscribe']:
+            # Must have a URL in the payload:
+            delivery_url = payload.get('delivery_url', None)
+            if delivery_url is None:
+                self.logErr("POST called with action '%s', but no delivery URL provided: %s" % (action, str(postBodyDict)))
+                self.returnHTTPError(400, "Action '%s' must provide a delivery_url in the payload field; offending message: '%s'" % (action, str(postBodyDict)))
+                return
+            # Do minimal check of the URL: must be scheme HTTPS to 
+            # ensure that message from the bus to the delivery URL are
+            # encrypted. Since the delivery will be a POST, there shouldn't
+            # be a query or fragment part:
+            url_segments = urlparse.urlparse(delivery_url)
+            if url_segments.scheme.lower() != 'https':
+                self.logErr("POST request specifying non-secure URL '%s': '%s'" % (delivery_url, str(postBodyDict)))
+                self.returnHTTPError(400, "Delivery URL must use an encrypted scheme (https); was %s. Offending POST body '%s'" % (delivery_url, str(postBodyDict)))
+                return
+            if len(url_segments.query) + len(url_segments.fragment) > 0:
+                self.logErr("POST request with non-empty query or fragment URL: '%s'" % str(postBodyDict))
+                self.returnHTTPError(400, "Delivery URL must not have a query or fragment part, but was '%s'. Offending POST body '%s'" % (delivery_url, str(postBodyDict)))
+                return
+            # Finally, all seems good for subscribe/unsubsribe:
+            if action == 'subscribe':
+                self.lti_subscribe(target_topic, delivery_url)
+            else:
+                self.lti_unsubscribe(target_topic, delivery_url)
+            return
+        else:
+            # Unknown action:
+            self.logErr("POST called with unknown action value '%s': '$s'" % (action, str(postBodyDict)))
+            self.returnHTTPError(501, "Action '%s' is not implemented; offending message: '%s'" % (action, str(postBodyDict)))
+            return
             
-        self.publish_to_bus(target_topic, payload)
+        return
+            
         
     def check_auth(self, postBodyDict, target_topic):
         '''
@@ -321,7 +369,7 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         to the same topic multiple times with the same URL. All 
         URLs will be POSTed to with incoming messages. It is safe
         to subscribe to the same topic with the same URL multiple
-        times. This event is a no-op. It is also legal to have message
+        times. This situation is a no-op. It is also legal to have message
         of multiple topics delivered to the same consumer URL.
         
         :param topic: the SchoolBus topic to listen to
@@ -446,9 +494,20 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         :param init_parm_dict: keyword args to pass to initialize() method.
         :type init_parm_dict: {string : <any>}
         '''
-        application = tornado.web.Application([
-            (r"/schoolbus", LTISchoolbusBridge, init_parm_dict),
-            ])
+        
+        settings = {
+                    'path': os.path.join(os.path.dirname(__file__), 'static_html'),
+                    'default_filename': 'index.html'
+                    }
+        
+        handlers = [
+                    (r"/schoolbus", LTISchoolbusBridge),
+                    #****(r"/schoolbus/(.*)", LTISchoolbusBridge),
+                    (r"/schoolbus/(.*)", tornado.web.StaticFileHandler, settings)
+                    #***(r"/schoolbus/{0,1}$", tornado.web.StaticFileHandler, settings)
+                    ]        
+        
+        application = tornado.web.Application(handlers)
         return application
 
 if __name__ == "__main__":
