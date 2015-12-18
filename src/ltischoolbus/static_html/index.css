@@ -1,0 +1,9 @@
+H1   { text-align: center; }
+p.note { text-align: center; 
+         font-size: 130%;
+       }
+IMG.centered  { margin-left: auto;
+		margin-right: auto;
+		display: block;
+	      }
+.narrow { width: 500px;}

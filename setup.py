@@ -11,7 +11,7 @@ setup(
     # Dependencies on other packages:
     setup_requires   = ['nose>=1.1.2'],
     tests_require    = test_requirements,
-    install_requires = ['redis_bus_python>=0.0.2',
+    install_requires = ['redis_bus_python>=0.0.3',
 			'tornado>=4.3',
 			'singledispatch>=3.4.0.3',
 			'backports_abc>=0.4',

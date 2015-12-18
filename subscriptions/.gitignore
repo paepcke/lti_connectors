@@ -1,0 +1,8 @@
+# Ensure that the <projRoot>/subscriptions directory 
+# is present in the repo and any clones, but that
+# no content (the actual LTI subscriptions files)
+# are uploaded to the directory.
+
+*
+
+!.gitignore

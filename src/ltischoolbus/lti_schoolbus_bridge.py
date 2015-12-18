@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 '''
 Created on Apr 29, 2015
 
@@ -14,17 +16,16 @@ import sys
 import urlparse
 
 import jsmin
+from jsonfiledict import JsonFileDict
+
 from redis_bus_python.bus_message import BusMessage
 from redis_bus_python.redis_bus import BusAdapter
-from tornado import httpserver
-from tornado import web
 import tornado
-import tornado.ioloop
+from tornado import web
+from tornado import httpserver
+from tornado import ioloop
 
-
-# TODO: - Switch subscribe/unsubscribe from GET to POST so that key/secret can be included
-#       - Initialize the subscription jsonfiledict in __main__.
-#       - More in-method comments
+# TODO: # update img with new delivery example (i.e. include ltiKey/ltiSecret)
 USE_CENTRAL_EVENT_LOOP = True
 
 # {
@@ -56,7 +57,7 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
     this format:
             {
                 "time"   : "ISO time string",
-                "topic"  : "SchoolBus topic of bus message",
+                "bus_topic"  : "SchoolBus topic of bus message",
                 "payload": "message's 'content' field"
             }    
     
@@ -110,7 +111,18 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
             "bus_topic" : "studentAction",
             "payload" :
 		    "delivery_url" : "https://myMachine.myDomain.edu"
-        }    
+        }
+        
+    When a message arrives on the bus, it will be
+    POSTed to each subscribed URL, with this body:
+    
+        {
+            "key" : "myLTIKey",
+            "secret" : "myLTISecret",
+            "time" : "2007-01-25T12:00:00Z",
+            "payload": "..."
+        }
+    
     
         
     Authentication is controlled by a config file. See file ltibridge.cnf.example
@@ -122,34 +134,42 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
     
     '''
 
-    LTI_PORT = 7075
+    LTI_BRIDGE_DELIVERY_TEST_PORT = 7075
 
     # Remember whether logging has been initialized (class var!):
     loggingInitialized = False
     logger = None
-    auth_dict = {}        
+    
+    # Dict with info obtained from the authentication 
+    # config file:
+    auth_dict = {}
+    
+    # Keep track of SchoolBus subscriptions:
+    
+    # File in which jsonfiledict will store subscriptions:
+    subscriptions_path = os.path.join(os.path.dirname(__file__), '../../subscriptions/lti_bus_subscriptions.json')
     
     def initialize(self):
+        '''
+        This method is call once when the server is started. In 
+        contrast, the __init__() method, which we don't override
+        in this class is called every time a new request arrives.
+        '''
         
         # Create a BusAdapter instance that handles all
         # interactions with the SchoolBus:
         self.busAdapter = BusAdapter()
-            
+        
+        # Create or read existing JSON file with all
+        # subscriptions:
+        self.lti_subscriptions = JsonFileDict(LTISchoolbusBridge.subscriptions_path)
+        self.lti_subscriptions.load()
+        # If there are subscriptions from last time this
+        # server ran, then re-subscribe to them:
+        for bus_topic in self.lti_subscriptions.keys():
+            self.busAdapter.subscribeToTopic(bus_topic, functools.partial(self.to_lti_transmitter))
+        
     # -------------------------------- HTTP Handler ---------
-
-#     def get(self):
-#         self.render("static_html/index.html")
-
-#     def get(self):
-#         '''
-#         GET is used for the following:
-#             - Subscribe to SchoolBus topic: http://.../?action=subscribe&topic=myTopic&url=myDeliveryUrl
-#             - Unsubscribe from a SchoolBus topic: http://.../?action=unsubscribe&topic=myTopic&url=myDeliveryUrl
-#         '''
-#         
-#         getParms = self.request.arguments
-#         #self.write("<html><body>GET method was called: %s.</body></html>" %str(getParms))
-#         self.returnHTTPError(501, 'The GET method is not implemented')
 
     def post(self):
         '''
@@ -177,7 +197,7 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         # Does msg contain the required 'action' field?
         action = postBodyDict.get('action', None)
         if action is None:
-            self.logErr("POST called without action field: '$s'" % str(postBodyDict))
+            self.logErr("POST called without action field: '%s'" % str(postBodyDict))
             self.returnHTTPError(400, 'Message did not include an action field: %s' % str(postBodyDict))
             return
         # Normalize capitalization:
@@ -265,8 +285,8 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         '''
         
         try:
-            given_key = postBodyDict['key']
-            given_secret = postBodyDict['secret']
+            given_key = postBodyDict['ltiKey']
+            given_secret = postBodyDict['ltiSecret']
         except KeyError:
             self.logErr('Either key or secret missing in incoming POST: %s' % str(postBodyDict))
             self.returnHTTPError(400, 'Either key or secret were not included in LTI request: %s' % str(postBodyDict))
@@ -380,17 +400,17 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         self.busAdapter.subscribeToTopic(topic, functools.partial(self.to_lti_transmitter))
         try:
             # Do we already have this URL subscribed for this topic?
-            LTISchoolbusBridge.lti_subscriptions[topic].index(url)
+            self.lti_subscriptions[topic].index(url)
         except KeyError:
             # Nobody is currently subscribed to the topic:
-            LTISchoolbusBridge.lti_subscriptions[topic] = [url]
-            LTISchoolbusBridge.lti_subscriptions.save()
+            self.lti_subscriptions[topic] = [url]
+            self.lti_subscriptions.save()
             return
         except ValueError:
             # There are subscriptions to the topic, but url is not among them;
             # this is the 'normal' case:
-            LTISchoolbusBridge.lti_subscriptions[topic].append(url)
-            LTISchoolbusBridge.lti_subscriptions.save()
+            self.lti_subscriptions[topic].append(url)
+            self.lti_subscriptions.save()
             return
         
     def lti_unsubscribe(self, topic, url):
@@ -408,8 +428,8 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         '''
         self.busAdapter.unsubscribeFromTopic(topic)
         try:
-            LTISchoolbusBridge.lti_subscriptions[topic].remove(url)
-            LTISchoolbusBridge.lti_subscriptions.save()
+            self.lti_subscriptions[topic].remove(url)
+            self.lti_subscriptions.save()
         except (KeyError, ValueError):
             # Subscription wasn't in our records:
             pass
@@ -433,14 +453,17 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         :param bus_msg: the incoming SchoolBus message
         :type bus_msg: BusMessage
         '''
-        topic = bus_msg.topicName()
+        topic = bus_msg.topicName
         try:
-            subscriber_urls = LTISchoolbusBridge.subsciber_dict[topic]
+            # Get the list of LTI URLs where msgs of this topic are to
+            # be delivered:
+            subscriber_urls = self.lti_subscriptions[topic]
         except KeyError:
             self.logErr("Server received msg for topic '%s', but subscriber dict has no subscribers for that topic." % topic)
             self.busAdapter.unsubscribeFromTopic(topic)
             return
-        msg_to_post = '{"time" : "%s", "topic" : "%s", "payload" : "%s"}' % (bus_msg.isoTime(), topic, bus_msg.content)
+        msg_to_post = '{"time" : "%s", "bus_topic" : "%s", "payload" : "%s"}' % (bus_msg.isoTime, topic, bus_msg.content)
+        # POST the msg to each LTI URL that requested the topic:
         for lti_subscriber_url in subscriber_urls:
             try:
                 r = requests.post(lti_subscriber_url, msg_to_post)
@@ -500,11 +523,11 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
                     'default_filename': 'index.html'
                     }
         
+        # React to HTTPS://<server>:<post>/:  Only GET will work, and will show instructions.
+        # and to   HTTPS://<server>:<post>/schoolbus  Only POST will work there.
         handlers = [
                     (r"/schoolbus", LTISchoolbusBridge),
-                    #****(r"/schoolbus/(.*)", LTISchoolbusBridge),
-                    (r"/schoolbus/(.*)", tornado.web.StaticFileHandler, settings)
-                    #***(r"/schoolbus/{0,1}$", tornado.web.StaticFileHandler, settings)
+                    (r"/(.*)", tornado.web.StaticFileHandler, settings)
                     ]        
         
         application = tornado.web.Application(handlers)
@@ -578,13 +601,13 @@ if __name__ == "__main__":
                                                              "keyfile" : "/home/paepcke/.ssl/MonoCertSha2Expiration2018/mono.stanford.edu.key"
     })
     
-    print('Starting LTI-Schoolbus bridge on port %s' % LTISchoolbusBridge.LTI_PORT)
+    print('Starting LTI-Schoolbus bridge on port %s' % LTISchoolbusBridge.LTI_BRIDGE_DELIVERY_TEST_PORT)
     
     # Run the app on its port:
     # Instead of application.listen, as in non-SSL
     # services, the http_server is told to listen:
     #*****application.listen(LTISchoolbusBridge.LTI_PORT)
-    http_server.listen(LTISchoolbusBridge.LTI_PORT)
+    http_server.listen(LTISchoolbusBridge.LTI_BRIDGE_DELIVERY_TEST_PORT)
     try:
         tornado.ioloop.IOLoop.instance().start()
     except KeyboardInterrupt:
