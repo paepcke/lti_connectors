@@ -462,7 +462,25 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
             self.logErr("Server received msg for topic '%s', but subscriber dict has no subscribers for that topic." % topic)
             self.busAdapter.unsubscribeFromTopic(topic)
             return
-        msg_to_post = '{"time" : "%s", "bus_topic" : "%s", "payload" : "%s"}' % (bus_msg.isoTime, topic, bus_msg.content)
+        
+        # Look up the ltiKey and ltiSecret for the
+        # topic:
+        # Get sub-dict with secret and key from config file
+        # See class header for config file format:
+        try:
+            auth_entry = LTISchoolbusBridge.auth_dict[topic]
+            (ltiKey, ltiSecret) = (auth_entry['ltiKey'], auth_entry['ltiSecret'])
+        except KeyError:
+            # Yes, there is a subscriber for this topic, but
+            # not a key and/or secret.
+            self.logErr('Received bus msg on topic %s to which subscriptions existed, but no key/secret.' % topic)
+            # Unsubscribe from this topic:
+            self.busAdapter.unsubscribeFromTopic(topic)
+            return
+        
+        msg_to_post = '{"time" : "%s", "ltiKey" : "%s", "ltiSecret" : "%s", "bus_topic" : "%s", "payload" : "%s"}' %\
+            (bus_msg.isoTime, ltiKey, ltiSecret, topic, bus_msg.content)
+
         # POST the msg to each LTI URL that requested the topic:
         for lti_subscriber_url in subscriber_urls:
             try:
