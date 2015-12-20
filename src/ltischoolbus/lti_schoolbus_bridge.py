@@ -3,27 +3,44 @@
 '''
 Created on Apr 29, 2015
 
+TODO: 
+   o Add SSL to POSTing of delivery. Currently the delivery_rx_server is unhappy w/ ssl-wrong
+       Candidates are 'request' package with 'httpsig' package: https://pypi.python.org/pypi/httpsig.
+       Latter has (sparse) instructions for use with 'request'. 
+       httpsig: what is the 'key_id', and where to put the POST txt;
+       they only show GET example. 
+   o Maybe test whether automatic redis-server starting works.
+   o Document that you must use:
+       cd proj-root
+       pip install .
+     Latter will find the setup.py file.
+
 @author: paepcke
 '''
 import argparse
+from distutils.spawn import find_executable
 import functools
 import json
 import logging
 import os
-import requests
-from requests.exceptions import ConnectionError
+import re
+import signal
+from subprocess import Popen
+import subprocess
 import sys
 import urlparse
 
 import jsmin
 from jsonfiledict import JsonFileDict
-
 from redis_bus_python.bus_message import BusMessage
 from redis_bus_python.redis_bus import BusAdapter
-import tornado
-from tornado import web
+import requests
+from requests.exceptions import ConnectionError
 from tornado import httpserver
-from tornado import ioloop
+from tornado import web
+import tornado
+import tornado.ioloop
+
 
 # TODO: # update img with new delivery example (i.e. include ltiKey/ltiSecret)
 USE_CENTRAL_EVENT_LOOP = True
@@ -143,6 +160,12 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
     # Dict with info obtained from the authentication 
     # config file:
     auth_dict = {}
+    
+    # Whether or not the redis-server was running when this bridge
+    # service was started. If it wasn't running, we start it as
+    # part of our startup. The following remembers whether we
+    # did start, so we have a choice of killing it upon exit:
+    redis_pid = None     
     
     # Keep track of SchoolBus subscriptions:
     
@@ -397,7 +420,7 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         :param url: URI where consumer is ready to receive POSTs with incoming messages
         :type url: str
         '''
-        self.busAdapter.subscribeToTopic(topic, functools.partial(self.to_lti_transmitter))
+
         try:
             # Do we already have this URL subscribed for this topic?
             self.lti_subscriptions[topic].index(url)
@@ -405,14 +428,14 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
             # Nobody is currently subscribed to the topic:
             self.lti_subscriptions[topic] = [url]
             self.lti_subscriptions.save()
-            return
         except ValueError:
             # There are subscriptions to the topic, but url is not among them;
             # this is the 'normal' case:
             self.lti_subscriptions[topic].append(url)
             self.lti_subscriptions.save()
-            return
-        
+
+        self.busAdapter.subscribeToTopic(topic, functools.partial(self.to_lti_transmitter))
+                
     def lti_unsubscribe(self, topic, url):
         '''
         Allows LTI consumers to unsubscribe from a SchoolBus topic.
@@ -550,6 +573,35 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         
         application = tornado.web.Application(handlers)
         return application
+    
+# Note: function not method:
+def sig_handler(sig, frame):
+    # Schedule call to shutdown, so that all ioloop
+    # related calls are from main thread:
+    #****** 
+    print('Signal handler called')
+    #****** 
+    io_loop = tornado.ioloop.IOLoop.instance()
+    # Schedule the shutdown for after all pending
+    # requests have been services:
+    print('Shutting down LTI-to-SchoolBus bridge...')
+    io_loop.add_callback(io_loop.stop)
+
+
+def is_running(process):
+    '''
+    Return true if Linux process with given name is
+    running.
+    
+    :param process: process name as appears in ps -axw
+    :type process: string
+    '''
+    search_proc = subprocess.Popen(['ps', 'axw'],stdout=subprocess.PIPE)
+    for ps_line in search_proc.stdout:
+        if re.search(process, ps_line):
+            return True 
+    return False
+    
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog=os.path.basename(sys.argv[0]), formatter_class=argparse.RawTextHelpFormatter)
@@ -584,6 +636,22 @@ if __name__ == "__main__":
         loglevel = logging.DEBUG
     else:
         loglevel = logging.NOTSET
+     
+    # Catch SIGTERM (cnt-C):
+    signal.signal(signal.SIGTERM, sig_handler)
+       
+    # If the redis-server is not running, complain:
+    if (not is_running('redis-server')):
+        executable = find_executable('redis-server')
+        if executable is None:
+            print("The necessary program 'redis-server' is not running, and we could not find its executable.")
+            sys.exit()
+        print("Required redis-server not running; starting it now.")
+        print("To run the service manually ahead of time: cd %s;redis-server &" % os.path.dirname(executable))
+        # Remember that we started the server, and kill at upon clean exit:
+        LTISchoolbusBridge.redis_pid = Popen([executable]).pid
+    else:
+        LTISchoolbusBridge.redis_pid = None
         
     # Set up logging; the logger will be a class variable used
     # by all instances:
@@ -629,6 +697,6 @@ if __name__ == "__main__":
     try:
         tornado.ioloop.IOLoop.instance().start()
     except KeyboardInterrupt:
-            print('Stopping LTI-Schoolbus bridge.')
+            print('LTI-to-Schoolbus bridge has stopped.')
             sys.exit()
             

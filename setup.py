@@ -18,6 +18,7 @@ setup(
 			'certifi>=2015.11.20.1',
 			'minify>=0.1.4',
 			'requests>=2.8.1',
+			'httpsig>=1.1.2',
 			'jsonfiledict>=0.2.post1',
 			] + test_requirements,
 
