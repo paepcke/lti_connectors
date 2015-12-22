@@ -672,7 +672,7 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         :raise IOError if default keyfile is not present, or not readable.
         '''
         
-        ssl_root = os.getenv('HOME') + '.ssl'
+        ssl_root = os.getenv('HOME') + '/.ssl'
         fqdn = socket.getfqdn()
         keypath = os.path.join(ssl_root, fqdn + '.key')
         try:
