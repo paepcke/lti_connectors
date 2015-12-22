@@ -551,14 +551,14 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         # POST the msg to each LTI URL that requested the topic:
         for lti_subscriber_url in subscriber_urls:
             try:
-                #******r = requests.post(lti_subscriber_url, data=msg_to_post, verify=False)
-                r = requests.post(lti_subscriber_url, 
-                                  data=msg_to_post, 
-                                  cert=['/home/paepcke/.ssl/duo_stanford_edu.pem',
-                                        '/home/paepcke/.ssl/duo.stanford.edu.key'],
-                                  verify=True)
+                r = requests.post(lti_subscriber_url, data=msg_to_post, verify=False)
+#                 r = requests.post(lti_subscriber_url, 
+#                                   data=msg_to_post, 
+#                                   cert=['/home/paepcke/.ssl/duo_stanford_edu.pem',
+#                                         '/home/paepcke/.ssl/duo.stanford.edu.key'],
+#                                   verify=True)
             except ConnectionError:
-                self.logErr('Bad delivery URL %s for topic %s' % (lti_subscriber_url, topic))
+                self.logErr('Bad delivery URL %s or SSL configuration for topic %s' % (lti_subscriber_url, topic))
                 continue
             (status, reason) = (r.status_code, r.reason)
             if status != '200':
