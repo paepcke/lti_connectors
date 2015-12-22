@@ -25,12 +25,12 @@ import logging
 import os
 import re
 import signal
+import socket
 from subprocess import Popen
 import subprocess
 import sys
 import urlparse
 
-import jsmin
 from jsonfiledict import JsonFileDict
 from redis_bus_python.bus_message import BusMessage
 from redis_bus_python.redis_bus import BusAdapter
@@ -40,6 +40,8 @@ from tornado import httpserver
 from tornado import web
 import tornado
 import tornado.ioloop
+
+from ltischoolbus.jsmin import jsmin
 
 
 # TODO: # update img with new delivery example (i.e. include ltiKey/ltiSecret)
@@ -87,8 +89,8 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
     
     Expected format from LTI consumer is:
          {
-            "key"         : <lti-key>,
-            "secret"      : <lti-secret>,
+            "ltiKey"         : <lti-key>,
+            "ltiSecret"      : <lti-secret>,
             "action"      : {"publish" | "subscribe" | "unsubscribe"},
             "bus_topic"   : <schoolbus topic>>
             "payload"     :
@@ -106,8 +108,8 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
      An example payload for action publish:
 
         {
-            "key" : "myLtiKey",
-            "secret" : "myLtiSecret",
+            "ltiKey" : "myLtiKey",
+            "ltiSecret" : "myLtiSecret",
             "action" : "publish,
             "bus_topic" : "studentAction",
             "payload" :
@@ -122,20 +124,21 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         
     Example for subscribe:
         {
-            "key" : "myLtiKey",
-            "secret" : "myLtiSecret",
+            "ltiKey" : "myLtiKey",
+            "ltiSecret" : "myLtiSecret",
             "action" : "publish,
             "bus_topic" : "studentAction",
-            "payload" :
-		    "delivery_url" : "https://myMachine.myDomain.edu"
+            "payload" : {
+		                  "delivery_url" : "https://myMachine.myDomain.edu"
+		                }
         }
         
     When a message arrives on the bus, it will be
     POSTed to each subscribed URL, with this body:
     
         {
-            "key" : "myLTIKey",
-            "secret" : "myLTISecret",
+            "ltiKey" : "myLTIKey",
+            "ltiSecret" : "myLTISecret",
             "time" : "2007-01-25T12:00:00Z",
             "payload": "..."
         }
@@ -157,6 +160,12 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
     loggingInitialized = False
     logger = None
     
+    # Path to config file, which holds LTI keys/secrets:
+    configfile = None
+    # Config file's modification time when auth_dict
+    # is initialized from the file:
+    auth_file_mod_time = None
+    
     # Dict with info obtained from the authentication 
     # config file:
     auth_dict = {}
@@ -171,7 +180,7 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
     
     # File in which jsonfiledict will store subscriptions:
     subscriptions_path = os.path.join(os.path.dirname(__file__), '../../subscriptions/lti_bus_subscriptions.json')
-    
+
     def initialize(self):
         '''
         This method is call once when the server is started. In 
@@ -328,31 +337,65 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
             # for the target bus topic:            
             key_on_record = auth_entry['ltiKey'] 
             if key_on_record != given_key:
-                self.logErr("Key '%s' does not match key for topic '%s' in config file." % (given_key, target_topic))
-                # Required response header field for 401-not authenticated:
-                self.set_header('WWW-Authenticate', 'key/secret')
-                self.returnHTTPError(401, "Service not authorized for bus topic '%s'" % target_topic)
-                return False
+                # One more chance: was auth file updated since we
+                # last loaded it into auth_dict?
+                if self.reload_auth_if_new():
+                    # Load the modified auth info again:
+                    auth_entry = LTISchoolbusBridge.auth_dict[target_topic]
+                    key_on_record = auth_entry['ltiKey'] 
+                    # Now is all OK?
+                    if key_on_record != given_key:
+                        self.logErr("Key '%s' does not match key for topic '%s' in config file." % (given_key, target_topic))
+                        # Required response header field for 401-not authenticated:
+                        self.set_header('WWW-Authenticate', 'key/secret')
+                        self.returnHTTPError(401, "Service not authorized for bus topic '%s'" % target_topic)
+                        return False
 
             secret_on_record = auth_entry['ltiSecret'] 
             if secret_on_record != given_secret:
-                self.logErr("Secret '%s' does not match secret for topic '%s' in config file." % (given_secret, target_topic))
-                # Required response header field for 401-not authenticated:
-                self.set_header('WWW-Authenticate', 'key/secret')
-                self.returnHTTPError(401, "Service not authorized for bus topic '%s'" % target_topic)
-                return False
+                # One more chance: was auth file updated since we
+                # last loaded it into auth_dict?
+                if self.reload_auth_if_new():
+                    # Load the modified auth info again:
+                    auth_entry = LTISchoolbusBridge.auth_dict[target_topic]
+                    secret_on_record = auth_entry['ltiSecret'] 
+                    # Now is all OK?
+                    if secret_on_record != given_secret:
+                        self.logErr("Secret '%s' does not match secret for topic '%s' in config file." % (given_secret, target_topic))
+                        # Required response header field for 401-not authenticated:
+                        self.set_header('WWW-Authenticate', 'key/secret')
+                        self.returnHTTPError(401, "Service not authorized for bus topic '%s'" % target_topic)
+                        return False
                 
         except KeyError:
             # Either no config file entry for target topic, or malformed
             # config file that does not include both 'ltikey' and 'ltisecret'
             # JSON fields for given target topic: 
-            self.logErr("Topic '%s' does not have an entry in the config file, or ill-formed config file for that topic." % target_topic)
+            self.logErr("No entry for topic '%s' in config file, or ill-formed config file; --> Requestor not authorized for this topic" %\
+                        target_topic)
             # Required response header field for 401-not authenticated:
             self.set_header('WWW-Authenticate', 'given_key/given_secret')
             self.returnHTTPError(401, "Service not authorized for bus topic '%s'" % target_topic)
             return False
 
         return True
+
+    def reload_auth_if_new(self):
+        '''
+        Check whether config file with its LTI keys and secrets
+        was modified since last load into auth_dict. If so, update
+        auth_dict and return True. Else just return False.
+        :return True if auth_dict was updated, else return False.
+        :rtype bool
+        '''
+        
+        statinfo = os.stat(LTISchoolbusBridge.configfile)
+        if LTISchoolbusBridge.auth_file_mod_time < statinfo.st_mtime and\
+           LTISchoolbusBridge.load_auth_info(LTISchoolbusBridge.configfile, except_on_failure=False):
+            return True
+        else:
+            return False
+        
 
     def returnHTTPError(self, status_code, msg):
         '''
@@ -507,7 +550,12 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         # POST the msg to each LTI URL that requested the topic:
         for lti_subscriber_url in subscriber_urls:
             try:
-                r = requests.post(lti_subscriber_url, msg_to_post)
+                #******r = requests.post(lti_subscriber_url, data=msg_to_post, verify=False)
+                r = requests.post(lti_subscriber_url, 
+                                  data=msg_to_post, 
+                                  cert=['/home/paepcke/.ssl/duo_stanford_edu.pem',
+                                        '/home/paepcke/.ssl/duo.stanford.edu.key'],
+                                  verify=True)
             except ConnectionError:
                 self.logErr('Bad delivery URL %s for topic %s' % (lti_subscriber_url, topic))
                 continue
@@ -549,8 +597,47 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
     def logErr(self, msg):
         LTISchoolbusBridge.logger.error(msg)
         
+    @classmethod
+    def load_auth_info(cls, configfile, except_on_failure=False):
+        '''
+        Given location of the configuration file, which holds
+        the keys and secrets of authorized LTI components,
+        (re)-initialize the class variable auth_dict from
+        that file. It is ok to call this method more than once.
+        Class variable LTISchoolbusBridge.auth_file_mod_time is
+        updated with current file mod time.
+        
+        :param configfile: full path to config file; by default in $HOME/.ssh/ltibridge.cnf.
+        :type configifle: string
+        :param except_on_failure: If True exceptions are raised if 
+            file not available, or content is ill-formed. If False
+            then boolean return value signifies successful load.
+        :return True if auth info could be loaded and parsed. Else False.
+        :rtype bool
+        :raised IOError
+        :raised ValueError 
+        '''
+
+        try:
+            with open(configfile, 'r') as conf_fd:
+                # Use jsmin to remove any C/C++ comments from the
+                # config file:
+                LTISchoolbusBridge.auth_dict = json.loads(jsmin(conf_fd.read()))
+                statinfo = os.stat(configfile)
+                LTISchoolbusBridge.auth_file_mod_time = statinfo.st_mtime
+        except IOError:
+            if except_on_failure:
+                raise
+            else:
+                return False
+        except ValueError:
+            if except_on_failure:
+                raise
+            else:
+                return False
+
     @classmethod  
-    def makeApp(self, init_parm_dict):
+    def makeApp(cls, init_parm_dict):
         '''
         Create the tornado application, making it 
         called via http://myServer.stanford.edu:<port>/schoolbus
@@ -574,13 +661,73 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         application = tornado.web.Application(handlers)
         return application
     
+    @classmethod
+    def guess_key_path(cls):
+        '''
+        Check whether an SSL key file exists, and is readable
+        at $HOME/.ssl/<fqdn>.key. If so, the full path is
+        returned, else throws IOERROR.
+
+        :raise IOError if default keyfile is not present, or not readable.
+        '''
+        
+        ssl_root = os.getenv('HOME') + '.ssl'
+        fqdn = socket.getfqdn()
+        keypath = os.path.join(ssl_root, fqdn + '.key')
+        try:
+            with open(keypath, 'r'):
+                pass
+        except IOError:
+            raise IOError('No key file %s exists.' % keypath)
+        return keypath
+
+
+    @classmethod
+    def guess_cert_path(cls):
+        '''
+        Check whether an SSL cert file exists, and is readable.
+        Will check three possibilities:
+        
+           - $HOME/.ssl/my_server_edu_cert.cer
+           - $HOME/.ssl/my_server_edu.cer
+           - $HOME/.ssl/my_server_edu.pem
+           
+        in that order. 'my_server_edu' is the fully qualified
+        domain name of this server.
+
+        If one readable file of that name is found, the full path is
+        returned, else throws IOERROR.
+
+        :raise IOError if default keyfile is not present, or not readable.
+        '''
+        
+        ssl_root = os.getenv('HOME') + '/.ssl'
+        fqdn = socket.getfqdn().replace('.', '_')
+        certpath1 = os.path.join(ssl_root, fqdn + '_cert.cer')
+        try:
+            with open(certpath1, 'r'):
+                return certpath1
+        except IOError:
+            pass
+        try:
+            certpath2 = os.path.join(ssl_root, fqdn + '.cer')
+            with open(certpath2, 'r'):
+                return certpath2
+        except IOError:
+            pass
+        
+        certpath3 = os.path.join(ssl_root, fqdn + '.pem')
+        try:
+            with open(certpath3, 'r'):
+                return certpath3
+        except IOError:
+            raise IOError('None of %s, %s, or %s exists or is readable.' %\
+                          (certpath1, certpath2, certpath3))
+    
 # Note: function not method:
 def sig_handler(sig, frame):
     # Schedule call to shutdown, so that all ioloop
     # related calls are from main thread:
-    #****** 
-    print('Signal handler called')
-    #****** 
     io_loop = tornado.ioloop.IOLoop.instance()
     # Schedule the shutdown for after all pending
     # requests have been services:
@@ -619,7 +766,16 @@ if __name__ == "__main__":
                         help='Logging level: one of critical, error, warning, info, debug.',
                         dest='loglevel',
                         default=None)
-    
+    parser.add_argument('--sslcert',
+                        help='Absolute path to SSL certificate file.',
+                        dest='certfile',
+                        default=None
+                        )
+    parser.add_argument('--sslkey',
+                        help='Absolute path to SSL key file.',
+                        dest='keyfile',
+                        default=None
+                        )
 
     args = parser.parse_args();
     
@@ -655,18 +811,28 @@ if __name__ == "__main__":
         
     # Set up logging; the logger will be a class variable used
     # by all instances:
+    # Ensure that the log file directory exists
+    try:
+        # Try to make intermediate dirs if needed.
+        # This statement will throw an exception
+        # if args.logile is none, or creation is
+        # impossible, or the director(ies) already
+        # exist. Just give it a try:
+        os.makedirs(os.path.dirname(args.logfile))
+    except:
+        pass
     LTISchoolbusBridge.setupLogging(loggingLevel=loglevel, logFile=args.logfile)
     
     # Read the config file, and make it available as a dict:
     configfile = args.configfile
     if configfile is None:
         configfile = os.path.join(os.getenv('HOME'), '.ssh/ltibridge.cnf')
-    
+        if not os.path.isfile(configfile):
+            with open(configfile, 'a+') as fd:
+                fd.write('{}')
+    LTISchoolbusBridge.configfile = configfile
     try:
-        with open(configfile, 'r') as conf_fd:
-            # Use jsmin to remove any C/C++ comments from the
-            # config file:
-            LTISchoolbusBridge.auth_dict = json.loads(jsmin.jsmin(conf_fd.read()))
+        LTISchoolbusBridge.load_auth_info(configfile, except_on_failure=True)
     except IOError:
         print('No configuration file found at %s' % configfile)
         sys.exit()
@@ -678,16 +844,60 @@ if __name__ == "__main__":
     
     application = LTISchoolbusBridge.makeApp({})
     
+    # If no SSL cert/key file was provided in a CLI option,
+    # make an educated guess: 
+    #   For cert file try:
+    #      $HOME/.ssl/my_server_edu_cert.cer
+    #      $HOME/.ssl/my_server_edu.cer
+    #
+    #   For key file try:
+    #      $HOME/.ssl/my.server.edu.key
+    #
+    try:
+        if args.certfile is None:
+            # Will throw IOError exception if not found:
+            args.certfile = LTISchoolbusBridge.guess_cert_path()
+        else:
+            # Was given cert path in CLI option. Check that
+            # it's there and readable:
+            try:
+                with open(args.certfile, 'r'):
+                    pass
+            except IOError as e:
+                raise IOError('Cert file %s does not exist or is not readable.' % args.certfile)
+    except IOError as e:
+        print('Cannot start server; no SSL certificate: %s.' % `e`)
+        sys.exit()
+    
+    try:
+        if args.keyfile is None:
+            # Will throw IOError exception if not found:
+            args.keyfile = LTISchoolbusBridge.guess_key_path()
+        else:
+            # Was given cert path in CLI option. Check that
+            # it's there and readable:
+            try:
+                with open(args.keyfile, 'r'):
+                    pass
+            except IOError:
+                raise IOError('Key file %s does not exist or is not readable.' % args.keyfile)
+    except IOError as e:
+        print('Cannot start server; no SSL key: %s.' % `e`)
+        sys.exit()
+    
     # We need an SSL capable HTTP server:
     # For configuration without a cert, add "cert_reqs"  : ssl.CERT_NONE
     # to the ssl_options (though I haven't tried it out.):
 
     http_server = tornado.httpserver.HTTPServer(application,
-                                                ssl_options={"certfile": "/home/paepcke/.ssl/MonoCertSha2Expiration2018/mono_stanford_edu_cert.cer",
-                                                             "keyfile" : "/home/paepcke/.ssl/MonoCertSha2Expiration2018/mono.stanford.edu.key"
+                                                ssl_options={"certfile": args.certfile,
+                                                             "keyfile" : args.keyfile
     })
-    
-    print('Starting LTI-Schoolbus bridge on port %s' % LTISchoolbusBridge.LTI_BRIDGE_DELIVERY_TEST_PORT)
+
+    fqdn = socket.getfqdn()
+    service_url  = 'https://%s:%s/schoolbus' % (fqdn, LTISchoolbusBridge.LTI_BRIDGE_DELIVERY_TEST_PORT)
+    info_url     = 'https://%s:%s/' % (fqdn, LTISchoolbusBridge.LTI_BRIDGE_DELIVERY_TEST_PORT)
+    print('Starting LTI-Schoolbus bridge for POST service at %s (info service at %s)' % (service_url, info_url))
     
     # Run the app on its port:
     # Instead of application.listen, as in non-SSL

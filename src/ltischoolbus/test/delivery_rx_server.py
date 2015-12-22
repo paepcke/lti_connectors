@@ -6,9 +6,11 @@ Created on Dec 15, 2015
 
 @author: paepcke
 '''
+import argparse
 import json
 import os
 import socket
+import ssl
 import sys
 
 from tornado import httpserver
@@ -65,9 +67,86 @@ class LtiBridgeDeliveryReceiver(tornado.web.RequestHandler):
         
         application = tornado.web.Application(handlers)
         return application
+
+    @classmethod
+    def guess_key_path(cls):
+        '''
+        Check whether an SSL key file exists, and is readable
+        at $HOME/.ssl/<fqdn>.key. If so, the full path is
+        returned, else throws IOERROR.
+
+        :raise IOError if default keyfile is not present, or not readable.
+        '''
+        
+        ssl_root = os.getenv('HOME') + '.ssl'
+        fqdn = socket.getfqdn()
+        keypath = os.path.join(ssl_root, fqdn + '.key')
+        try:
+            with open(keypath, 'r'):
+                pass
+        except IOError:
+            raise IOError('No key file %s exists.' % keypath)
+        return keypath
+
+
+    @classmethod
+    def guess_cert_path(cls):
+        '''
+        Check whether an SSL cert file exists, and is readable.
+        Will check three possibilities:
+        
+           - $HOME/.ssl/my_server_edu_cert.cer
+           - $HOME/.ssl/my_server_edu.cer
+           - $HOME/.ssl/my_server_edu.pem
+           
+        in that order. 'my_server_edu' is the fully qualified
+        domain name of this server.
+
+        If one readable file of that name is found, the full path is
+        returned, else throws IOERROR.
+
+        :raise IOError if default keyfile is not present, or not readable.
+        '''
+        
+        ssl_root = os.getenv('HOME') + '/.ssl'
+        fqdn = socket.getfqdn().replace('.', '_')
+        certpath1 = os.path.join(ssl_root, fqdn + '_cert.cer')
+        try:
+            with open(certpath1, 'r'):
+                return certpath1
+        except IOError:
+            pass
+        try:
+            certpath2 = os.path.join(ssl_root, fqdn + '.cer')
+            with open(certpath2, 'r'):
+                return certpath2
+        except IOError:
+            pass
+        
+        certpath3 = os.path.join(ssl_root, fqdn + '.pem')
+        try:
+            with open(certpath3, 'r'):
+                return certpath3
+        except IOError:
+            raise IOError('None of %s, %s, or %s exists or is readable.' %\
+                          (certpath1, certpath2, certpath3))
     
 
 if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser(prog=os.path.basename(sys.argv[0]), formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('--sslcert',
+                        help='Absolute path to SSL certificate file.',
+                        dest='certfile',
+                        default=None
+                        )
+    parser.add_argument('--sslkey',
+                        help='Absolute path to SSL key file.',
+                        dest='keyfile',
+                        default=None
+                        )
+
+    args = parser.parse_args();
     
     # Tornado application object (empty keyword parms dict):    
     
@@ -79,20 +158,69 @@ if __name__ == '__main__':
     # We assume that certificate and key are in the 
     # following places:
     #     $HOME/.ssl/<fqdn>_cert.cer
+    #     $HOME/.ssl/<fqdn>.cer
+    #     $HOME/.ssl/<fqdn>.pem
+    # and:
     #     $HOME/.ssl/<fqdn>.key
-    # If yours are different, change the statements below
+    # If yours are different, use the --sslcert and --sslkey
+    # CLI options.
 
-    # Get fully-qualified domain name of this server:
-    server_name = socket.getfqdn()
-    cert_path = os.path.join(os.getenv("HOME"), ".ssl/%s.cer" % server_name)
-    key_path  = os.path.join(os.getenv("HOME"), ".ssl/%s.key" % server_name)
-                             
-    http_server = tornado.httpserver.HTTPServer(application,
-                                                ssl_options={"certfile": cert_path,
-                                                             "keyfile" : key_path
-    })
+    try:
+        if args.certfile is None:
+            # Will throw IOError exception if not found:
+            args.certfile = LtiBridgeDeliveryReceiver.guess_cert_path()
+        else:
+            # Was given cert path in CLI option. Check that
+            # it's there and readable:
+            try:
+                with open(args.certfile, 'r'):
+                    pass
+            except IOError as e:
+                raise IOError('Cert file %s does not exist or is not readable.' % args.certfile)
+    except IOError as e:
+        print('Cannot start server; no SSL certificate: %s.' % `e`)
+        sys.exit()
     
-    print('Starting LTI-Schoolbus bridge test delivery receiver on port %s' % LtiBridgeDeliveryReceiver.LTI_BRIDGE_DELIVERY_TEST_PORT)
+    try:
+        if args.keyfile is None:
+            # Will throw IOError exception if not found:
+            args.keyfile = LtiBridgeDeliveryReceiver.guess_key_path()
+        else:
+            # Was given cert path in CLI option. Check that
+            # it's there and readable:
+            try:
+                with open(args.keyfile, 'r'):
+                    pass
+            except IOError:
+                raise IOError('Key file %s does not exist or is not readable.' % args.keyfile)
+    except IOError as e:
+        print('Cannot start server; no SSL key: %s.' % `e`)
+        sys.exit()
+
+    # Hack: I can't get Eclipse to find ssl.PROTOCOL_SSLv23, though
+    #       CLI python does. So we set it here. Yikes:
+    try:
+        from ssl import PROTOCOL_SSLv23
+    except ImportError:
+        PROTOCOL_SSLv23 = 2
+        
+    interim_certs_path = os.path.join(os.getenv("HOME"), ".ssl/duo_stanford_edu_interm.cer")
+    context = ssl.SSLContext(PROTOCOL_SSLv23)
+    context.verify_mode = ssl.CERT_REQUIRED 
+    context.load_cert_chain(args.certfile, args.keyfile)
+    context.load_verify_locations(interim_certs_path)
+    
+#     http_server = tornado.httpserver.HTTPServer(application,
+#                                                 ssl_options={"certfile": cert_path,
+#                                                              "keyfile" : key_path
+#     })
+    http_server = tornado.httpserver.HTTPServer(application,
+                                                ssl_options=context)
+
+    fqdn = socket.getfqdn()
+    service_url  = 'https://%s:%s/delivery' % (fqdn, LtiBridgeDeliveryReceiver.LTI_BRIDGE_DELIVERY_TEST_PORT)
+    
+    print('Starting LTI-Schoolbus bridge test delivery receiver at %s' % service_url)
     
     # Run the app on its port:
     # Instead of application.listen, as in non-SSL

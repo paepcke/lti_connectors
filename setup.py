@@ -6,17 +6,18 @@ test_requirements = ['sentinels>=0.0.6', 'nose>=1.0', 'python-dateutil>=2.2']
 setup(
     name = "lti_connectors",
     version = "0.0.1",
-    packages = find_packages(),
+    packages = find_packages('src'),
+    package_dir = {'':'src'},
 
     # Dependencies on other packages:
     setup_requires   = ['nose>=1.1.2'],
     tests_require    = test_requirements,
-    install_requires = ['redis_bus_python>=0.0.3',
+    install_requires = ['redis_bus_python>=0.0.5',
 			'tornado>=4.3',
+			'jsmin>=2.2.0',
 			'singledispatch>=3.4.0.3',
 			'backports_abc>=0.4',
 			'certifi>=2015.11.20.1',
-			'minify>=0.1.4',
 			'requests>=2.8.1',
 			'httpsig>=1.1.2',
 			'jsonfiledict>=0.2.post1',
