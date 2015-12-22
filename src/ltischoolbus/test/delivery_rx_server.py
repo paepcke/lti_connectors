@@ -204,20 +204,24 @@ if __name__ == '__main__':
     except ImportError:
         PROTOCOL_SSLv23 = 2
         
-    interim_certs_path = os.path.join(os.getenv("HOME"), ".ssl/duo_stanford_edu_interm.cer")
-    context = ssl.SSLContext(PROTOCOL_SSLv23)
-    context.verify_mode = ssl.CERT_REQUIRED 
-    context.load_cert_chain(args.certfile, args.keyfile)
-    context.load_verify_locations(interim_certs_path)
-    
-#     http_server = tornado.httpserver.HTTPServer(application,
-#                                                 ssl_options={"certfile": cert_path,
-#                                                              "keyfile" : key_path
-#     })
-    http_server = tornado.httpserver.HTTPServer(application,
-                                                ssl_options=context)
-
     fqdn = socket.getfqdn()
+
+# The following context-way of setting ssl configurations only
+# works starting in Python 2.7.9
+#     interim_certs_path = os.path.join(os.getenv("HOME"), ".ssl/duo_stanford_edu_interm.cer")
+#     context = ssl.SSLContext(PROTOCOL_SSLv23)
+#     context.verify_mode = ssl.CERT_REQUIRED 
+#     context.load_cert_chain(args.certfile, args.keyfile)
+#     context.load_verify_locations(interim_certs_path)
+
+#     http_server = tornado.httpserver.HTTPServer(application,
+#                                                 ssl_options=context)
+    
+    http_server = tornado.httpserver.HTTPServer(application,
+                                                ssl_options={"certfile": args.certfile,
+                                                             "keyfile" : args.keyfile
+    })
+
     service_url  = 'https://%s:%s/delivery' % (fqdn, LtiBridgeDeliveryReceiver.LTI_BRIDGE_DELIVERY_TEST_PORT)
     
     print('Starting LTI-Schoolbus bridge test delivery receiver at %s' % service_url)
