@@ -41,7 +41,8 @@ from tornado import web
 import tornado
 import tornado.ioloop
 
-from ltischoolbus.jsmin import jsmin
+#from ltischoolbus.jsmin import jsmin
+from jsmin import jsmin
 
 
 # TODO: # update img with new delivery example (i.e. include ltiKey/ltiSecret)
