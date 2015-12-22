@@ -561,7 +561,7 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
                 self.logErr('Bad delivery URL %s or SSL configuration for topic %s' % (lti_subscriber_url, topic))
                 continue
             (status, reason) = (r.status_code, r.reason)
-            if status != '200':
+            if status != 200:
                 self.logErr("Failed to deliver bus message to subscriber %s; %s: %s" % (lti_subscriber_url, status, reason))
             
             
