@@ -5,7 +5,7 @@ test_requirements = ['sentinels>=0.0.6', 'nose>=1.0', 'python-dateutil>=2.2']
 
 setup(
     name = "lti_connectors",
-    version = "0.0.1",
+    version = "0.0.2",
     packages = find_packages('src'),
     package_dir = {'':'src'},
 
