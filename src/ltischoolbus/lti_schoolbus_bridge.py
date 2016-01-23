@@ -3,7 +3,9 @@
 '''
 Created on Apr 29, 2015
 
-TODO: 
+TODO:
+   o At 642: When https://taffy..:7076/delivery is called, hangs a long
+       time before 'connection refused' 
    o Add SSL to POSTing of delivery. Currently the delivery_rx_server is unhappy w/ ssl-wrong
        Candidates are 'request' package with 'httpsig' package: https://pypi.python.org/pypi/httpsig.
        Latter has (sparse) instructions for use with 'request'. 
@@ -22,6 +24,7 @@ from distutils.spawn import find_executable
 import functools
 import json
 import logging
+from logging.handlers import TimedRotatingFileHandler
 import os
 import re
 import signal
@@ -29,8 +32,11 @@ import socket
 from subprocess import Popen
 import subprocess
 import sys
+import urllib2
+from urllib2 import URLError
 import urlparse
 
+from jsmin import jsmin
 from jsonfiledict import JsonFileDict
 from redis_bus_python.bus_message import BusMessage
 from redis_bus_python.redis_bus import BusAdapter
@@ -41,16 +47,14 @@ from tornado import web
 import tornado
 import tornado.ioloop
 
+
 #from ltischoolbus.jsmin import jsmin
-from jsmin import jsmin
-
-
 # TODO: # update img with new delivery example (i.e. include ltiKey/ltiSecret)
 USE_CENTRAL_EVENT_LOOP = True
 
 # {
-#      "key" : "ltiKey",
-#      "secret" : "ltiSecret",
+#      "ltiKey" : "ltiKey",
+#      "ltiSecret" : "ltiSecret",
 #      "action" : "publish",
 #      "bus_topic" :  "studentAction",
 #      "payload" :	    {"event_type": "problem_check",
@@ -149,6 +153,23 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
     Authentication is controlled by a config file. See file ltibridge.cnf.example
     of this distribution for the format of this file.
     
+    HTTP Error Codes Used:
+       400  (Bad Request) if no topic was provided in the request,
+                           or if no payload is included,
+                           or no delivery URL is included in a subscribe request
+       401  (Unauthorized) if ltiKey/ltiSecret are missing or incorrect,
+                           or if LTI client is not authorized to subscribe
+                           to a particular topic. 
+       403  (Forbidden)    if LTI client tries to use HTTP instead of HTTPS
+       405  (Method not Allowed) if 'action' field is missing.
+                       
+       409 (Conflict)      cannot provide both: a POST body, and a GET query
+                           in the URL.
+       415 (Unsupported Media Type) If message is not legal JSON.
+       
+       501 (Not Implemented) if 'action' field contains an unknown command.
+       
+    
     To test, you can use https://www.hurl.it/ with URL: 
        https://yourServer.edu:7075/schoolbus 
     replacing 7075 with the value of LTI_PORT in your installation.
@@ -197,10 +218,23 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         # subscriptions:
         self.lti_subscriptions = JsonFileDict(LTISchoolbusBridge.subscriptions_path)
         self.lti_subscriptions.load()
+        self.logInfo('Loaded existing subscriptions: %s' %\
+                      str(self.lti_subscriptions) if len(self.lti_subscriptions) > 0 else 'No subscriptions on record.')
+        
+        # Callback for BusAdapter when a message arrives
+        # on the bus, destined for an LTI end point:
+        self.bus_in_msg_callback = functools.partial(self.bus_to_lti_callback)
+        # Bus-inmsg-handler:
+        self.bus_in_msg_handler  = functools.partial(self.to_lti_transmitter)
+        
+        self.published_to_bus_counter = 0
+        self.delivered_to_lti_counter = 0
+        
         # If there are subscriptions from last time this
         # server ran, then re-subscribe to them:
         for bus_topic in self.lti_subscriptions.keys():
-            self.busAdapter.subscribeToTopic(bus_topic, functools.partial(self.to_lti_transmitter))
+            self.logInfo('Subscribing to bus topic %s' % bus_topic)
+            self.busAdapter.subscribeToTopic(bus_topic, self.bus_in_msg_callback)
         
     # -------------------------------- HTTP Handler ---------
 
@@ -224,14 +258,14 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
             postBodyDict = json.loads(str(postBodyForm))
         except ValueError:
             self.logErr('POST called with improper JSON: %s' % str(postBodyForm))            
-            self.returnHTTPError(400, 'Message did not include a proper JSON object %s' % str(postBodyForm))
+            self.returnHTTPError(415, 'Message did not include a proper JSON object %s' % str(postBodyForm))
             return
 
         # Does msg contain the required 'action' field?
         action = postBodyDict.get('action', None)
         if action is None:
             self.logErr("POST called without action field: '%s'" % str(postBodyDict))
-            self.returnHTTPError(400, 'Message did not include an action field: %s' % str(postBodyDict))
+            self.returnHTTPError(405, 'Message did not include an action field: %s' % str(postBodyDict))
             return
         # Normalize capitalization:
         action = action.lower()
@@ -247,17 +281,28 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         # check it against the config file:
 
         if not self.check_auth(postBodyDict, target_topic):
+            # check_auth will return the correct HTTP Error
+            # before returning.
             return
-            
             
         payload = postBodyDict.get('payload', None)
         if payload is None:
             self.logErr('POST called without payload field: %s' % str(postBodyDict))
             self.returnHTTPError(400, 'Message did not include a payload field: %s' % str(postBodyDict))
             return
+
+        # Ensure that payload is good JSON;
+        if not isinstance(payload, dict):
+            try:
+                json.loads(payload)
+            except ValueError:
+                self.logDebug('Bad JSON in payload field of message: %s' % str(payload))
+                self.returnHTTPError(415, 'Message payload field does not contain proper JSON: %s' % str(postBodyDict))
+                return
         
         # Finally, seems to be a legal msg; process the various actions:
         if action == 'publish':
+            self.logDebug("Req to publish to '%s': %s" % (target_topic, str(payload)))
             self.publish_to_bus(target_topic, payload)
             return
         elif action in ['subscribe', 'unsubscribe']:
@@ -274,21 +319,23 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
             url_segments = urlparse.urlparse(delivery_url)
             if url_segments.scheme.lower() != 'https':
                 self.logErr("POST request specifying non-secure URL '%s': '%s'" % (delivery_url, str(postBodyDict)))
-                self.returnHTTPError(400, "Delivery URL must use an encrypted scheme (https); was %s. Offending POST body '%s'" % (delivery_url, str(postBodyDict)))
+                self.returnHTTPError(403, "Delivery URL must use an encrypted scheme (https); was %s. Offending POST body '%s'" % (delivery_url, str(postBodyDict)))
                 return
             if len(url_segments.query) + len(url_segments.fragment) > 0:
                 self.logErr("POST request with non-empty query or fragment URL: '%s'" % str(postBodyDict))
-                self.returnHTTPError(400, "Delivery URL must not have a query or fragment part, but was '%s'. Offending POST body '%s'" % (delivery_url, str(postBodyDict)))
+                self.returnHTTPError(409, "Delivery URL must not have a query or fragment part, but was '%s'. Offending POST body '%s'" % (delivery_url, str(postBodyDict)))
                 return
             # Finally, all seems good for subscribe/unsubsribe:
             if action == 'subscribe':
+                self.logInfo('Subscribing to %s; LTI client: %s' % (target_topic, delivery_url))
                 self.lti_subscribe(target_topic, delivery_url)
             else:
+                self.logInfo('Unsubscribing from %s; LTI client: %s' % (target_topic, delivery_url))
                 self.lti_unsubscribe(target_topic, delivery_url)
             return
         else:
             # Unknown action:
-            self.logErr("POST called with unknown action value '%s': '$s'" % (action, str(postBodyDict)))
+            self.logErr("POST called with unknown action value '%s': '%s'" % (action, str(postBodyDict)))
             self.returnHTTPError(501, "Action '%s' is not implemented; offending message: '%s'" % (action, str(postBodyDict)))
             return
             
@@ -322,11 +369,11 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
             given_secret = postBodyDict['ltiSecret']
         except KeyError:
             self.logErr('Either key or secret missing in incoming POST: %s' % str(postBodyDict))
-            self.returnHTTPError(400, 'Either key or secret were not included in LTI request: %s' % str(postBodyDict))
+            self.returnHTTPError(401, 'Either key or secret were not included in LTI request: %s' % str(postBodyDict))
             return False
         except TypeError:
-            self.logErr('POST JSON payload of LTI request did not parse into a Python dictionary: %s' % str(postBodyDict))
-            self.returnHTTPError(400, 'POST JSON payload of LTI request did not parse into a Python dictionary: %s' % str(postBodyDict))
+            self.logErr('POST body of LTI request did not parse into a Python dictionary: %s' % str(postBodyDict))
+            self.returnHTTPError(415, 'POST body of LTI request did not parse into a Python dictionary: %s' % str(postBodyDict))
             return False
         
         try:
@@ -351,7 +398,15 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
                         self.set_header('WWW-Authenticate', 'key/secret')
                         self.returnHTTPError(401, "Service not authorized for bus topic '%s'" % target_topic)
                         return False
-
+                else:
+                    # Bad ltiKey:
+                    self.logErr("Key '%s' does not match key for topic '%s' in config file." % (given_key, target_topic))
+                    # Required response header field for 401-not authenticated:
+                    self.set_header('WWW-Authenticate', 'key/secret')
+                    self.returnHTTPError(401, "Service not authorized for bus topic '%s'" % target_topic)
+                    return False
+                    
+                    
             secret_on_record = auth_entry['ltiSecret'] 
             if secret_on_record != given_secret:
                 # One more chance: was auth file updated since we
@@ -367,6 +422,13 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
                         self.set_header('WWW-Authenticate', 'key/secret')
                         self.returnHTTPError(401, "Service not authorized for bus topic '%s'" % target_topic)
                         return False
+                else:
+                    self.logErr("Secret '%s' does not match secret for topic '%s' in config file." % (given_secret, target_topic))
+                    # Required response header field for 401-not authenticated:
+                    self.set_header('WWW-Authenticate', 'key/secret')
+                    self.returnHTTPError(401, "Service not authorized for bus topic '%s'" % target_topic)
+                    return False
+                    
                 
         except KeyError:
             # Either no config file entry for target topic, or malformed
@@ -393,6 +455,7 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         statinfo = os.stat(LTISchoolbusBridge.configfile)
         if LTISchoolbusBridge.auth_file_mod_time < statinfo.st_mtime and\
            LTISchoolbusBridge.load_auth_info(LTISchoolbusBridge.configfile, except_on_failure=False):
+            self.logInfo('Noticed that config file %s changed.' % LTISchoolbusBridge.configfile)
             return True
         else:
             return False
@@ -410,8 +473,7 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         :type msg: str
         '''
         self.clear()
-        self.write("Error: %s" % msg)        
-        self.set_status(status_code)
+        self.set_status(status_code, reason=msg)
 
         # The following, while simple, tries to put msg into the
         # HTTP header, where newlines are illegal. This limitation
@@ -445,8 +507,13 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         :param payload: will be placed in the bus message content field.
         :type payload: str
         '''
-        bus_message = BusMessage(content=payload, topicName=topic,)
+        bus_message = BusMessage(content=payload, topicName=topic)
         self.busAdapter.publish(bus_message)
+        
+        self.published_to_bus_counter += 1
+        # Note every 100 messages:
+        if self.published_to_bus_counter % 100 == 0:
+            self.logInfo('Published total of %s messages to bus.' % self.published_to_bus_counter)
     
     def lti_subscribe(self, topic, url):
         '''
@@ -501,6 +568,20 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
             # Subscription wasn't in our records:
             pass
         
+    def bus_to_lti_callback(self, bus_msg):
+        '''
+        Called from BusAdapter when a bus message arrives
+        for one or more LTI components. We just schedule
+        the real handler with the ioloop. This is so that
+        the Tornado and BusAdapter threads don't interfere:
+        the IOLoop is not thread-safe. self.bus_in_msg_handler
+        is the partial function for method to_lti_transmitter()
+        
+        :param bus_msg: message that arrived on the bus 
+        :type bus_msg: BusMessage
+        '''
+        tornado.ioloop.IOLoop.current().add_callback(self.bus_in_msg_handler, bus_msg)
+        
     def to_lti_transmitter(self, bus_msg):
         '''
         Called by BusAdapter with incoming messages to which at least
@@ -551,18 +632,26 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         # POST the msg to each LTI URL that requested the topic:
         for lti_subscriber_url in subscriber_urls:
             try:
-                r = requests.post(lti_subscriber_url, data=msg_to_post, verify=False)
+                request = urllib2.Request(lti_subscriber_url, msg_to_post, {'Content-Type': 'application/json'})
+                response = urllib2.urlopen(request, json.dumps(msg_to_post)) #@UnusedVariable
+
+#****                #r = requests.post(lti_subscriber_url, data=msg_to_post, verify=False)
 #                 r = requests.post(lti_subscriber_url, 
 #                                   data=msg_to_post, 
 #                                   cert=['/home/paepcke/.ssl/duo_stanford_edu.pem',
 #                                         '/home/paepcke/.ssl/duo.stanford.edu.key'],
 #                                   verify=True)
-            except ConnectionError:
-                self.logErr('Bad delivery URL %s or SSL configuration for topic %s' % (lti_subscriber_url, topic))
+            except URLError as e:
+                self.logErr('Bad delivery URL %s, SSL configuration for topic %s, or server down (%s).' %\
+                             (lti_subscriber_url, topic, `e`))
                 continue
-            (status, reason) = (r.status_code, r.reason)
-            if status != 200:
-                self.logErr("Failed to deliver bus message to subscriber %s; %s: %s" % (lti_subscriber_url, status, reason))
+#            (status, reason) = (r.status_code, r.reason)
+#            if status != 200:
+#                self.logErr("Failed to deliver bus message to subscriber %s; %s: %s" % (lti_subscriber_url, status, reason))
+            self.delivered_to_lti_counter += 1
+            # Note every 100 deliveries:
+            if self.delivered_to_lti_counter % 100 == 0:
+                self.logInfo('Delivered total of %s messages to LTI clients.' % self.delivered_to_lti_counter)
             
             
     # -------------------------------- Utilities ---------            
@@ -579,7 +668,10 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         if logFile is None:
             handler = logging.StreamHandler()
         else:
-            handler = logging.FileHandler(filename=logFile)
+            handler = TimedRotatingFileHandler(filename=logFile, 
+                                               when='D',          # Units in days
+                                               interval=30,       # Rotate every 30 days
+                                               backupCount=6)     # Keep at most 6 old logs
         formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
         handler.setFormatter(formatter)            
         cls.logger.addHandler(handler)
@@ -731,7 +823,7 @@ def sig_handler(sig, frame):
     # related calls are from main thread:
     io_loop = tornado.ioloop.IOLoop.instance()
     # Schedule the shutdown for after all pending
-    # requests have been services:
+    # requests have been serviced:
     print('Shutting down LTI-to-SchoolBus bridge...')
     io_loop.add_callback(io_loop.stop)
 
