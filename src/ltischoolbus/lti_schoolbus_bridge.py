@@ -181,8 +181,6 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
     # respond when trying to deliver a bus message to it:
     LTI_BRIDGE_DELIVERY_TIMEOUT = 1 # second
 
-    SSL_CONTEXT = None
-
     # Remember whether logging has been initialized (class var!):
     loggingInitialized = False
     logger = None
@@ -994,7 +992,6 @@ if __name__ == "__main__":
                                                              "keyfile" : args.keyfile
     })
 
-    LTISchoolbusBridge.SSL_CONTEXT = ssl.create_default_context()
     fqdn = socket.getfqdn()
     service_url  = 'https://%s:%s/schoolbus' % (fqdn, LTISchoolbusBridge.LTI_BRIDGE_SERVICE_PORT)
     info_url     = 'https://%s:%s/' % (fqdn, LTISchoolbusBridge.LTI_BRIDGE_SERVICE_PORT)
