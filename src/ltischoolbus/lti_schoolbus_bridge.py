@@ -4,8 +4,6 @@
 Created on Apr 29, 2015
 
 TODO:
-   o At 642: When https://taffy..:7076/delivery is called, hangs a long
-       time before 'connection refused' 
    o Add SSL to POSTing of delivery. Currently the delivery_rx_server is unhappy w/ ssl-wrong
        Candidates are 'request' package with 'httpsig' package: https://pypi.python.org/pypi/httpsig.
        Latter has (sparse) instructions for use with 'request'. 
@@ -29,11 +27,12 @@ import os
 import re
 import signal
 import socket
+import ssl
 from subprocess import Popen
 import subprocess
 import sys
-import urllib2
 from urllib2 import URLError
+import urllib2
 import urlparse
 
 from jsmin import jsmin
@@ -176,7 +175,13 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
     
     '''
 
-    LTI_BRIDGE_DELIVERY_TEST_PORT = 7075
+    LTI_BRIDGE_SERVICE_PORT = 7075
+    
+    # Time to wait for LTI provider (e.g. LMS) to
+    # respond when trying to deliver a bus message to it:
+    LTI_BRIDGE_DELIVERY_TIMEOUT = 1 # second
+
+    SSL_CONTEXT = None
 
     # Remember whether logging has been initialized (class var!):
     loggingInitialized = False
@@ -520,7 +525,7 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         Allows LTI consumers to subscribe to SchoolBus topics. 
         The consumer must supply a URL to which arriving messages
         and their time stamps are POSTed. It is legal to subscribe
-        to the same topic multiple times with the same URL. All 
+        to the same topic multiple times with different URLs. All 
         URLs will be POSTed to with incoming messages. It is safe
         to subscribe to the same topic with the same URL multiple
         times. This situation is a no-op. It is also legal to have message
@@ -633,7 +638,9 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         for lti_subscriber_url in subscriber_urls:
             try:
                 request = urllib2.Request(lti_subscriber_url, msg_to_post, {'Content-Type': 'application/json'})
-                response = urllib2.urlopen(request, json.dumps(msg_to_post)) #@UnusedVariable
+                response = urllib2.urlopen(request,             #@UnusedVariable
+                                           json.dumps(msg_to_post),
+                                           timeout=LTISchoolbusBridge.LTI_BRIDGE_DELIVERY_TIMEOUT) 
 
 #****                #r = requests.post(lti_subscriber_url, data=msg_to_post, verify=False)
 #                 r = requests.post(lti_subscriber_url, 
@@ -987,16 +994,17 @@ if __name__ == "__main__":
                                                              "keyfile" : args.keyfile
     })
 
+    LTISchoolbusBridge.SSL_CONTEXT = ssl.create_default_context()
     fqdn = socket.getfqdn()
-    service_url  = 'https://%s:%s/schoolbus' % (fqdn, LTISchoolbusBridge.LTI_BRIDGE_DELIVERY_TEST_PORT)
-    info_url     = 'https://%s:%s/' % (fqdn, LTISchoolbusBridge.LTI_BRIDGE_DELIVERY_TEST_PORT)
+    service_url  = 'https://%s:%s/schoolbus' % (fqdn, LTISchoolbusBridge.LTI_BRIDGE_SERVICE_PORT)
+    info_url     = 'https://%s:%s/' % (fqdn, LTISchoolbusBridge.LTI_BRIDGE_SERVICE_PORT)
     print('Starting LTI-Schoolbus bridge for POST service at %s (info service at %s)' % (service_url, info_url))
     
     # Run the app on its port:
     # Instead of application.listen, as in non-SSL
     # services, the http_server is told to listen:
     #*****application.listen(LTISchoolbusBridge.LTI_PORT)
-    http_server.listen(LTISchoolbusBridge.LTI_BRIDGE_DELIVERY_TEST_PORT)
+    http_server.listen(LTISchoolbusBridge.LTI_BRIDGE_SERVICE_PORT)
     try:
         tornado.ioloop.IOLoop.instance().start()
     except KeyboardInterrupt:

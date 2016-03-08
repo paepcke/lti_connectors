@@ -2,6 +2,12 @@
 # coding: utf-8
 
 '''
+Example for an endpoint in an LTI module, such as an LMS.
+The example interacts with the lti_schoolbus_bridge server
+to subscribe to a topic, receive a message of that topic
+from the bus, and unsubscribes. All these interactions
+occur via HTTP POST requests.  
+
 Created on Dec 15, 2015
 
 @author: paepcke
@@ -12,11 +18,13 @@ import os
 import socket
 import ssl
 import sys
+import urllib2
 
 from tornado import httpserver
 from tornado import ioloop
 from tornado import web
 import tornado
+from tornado.gen import coroutine
 
 
 class LtiBridgeDeliveryReceiver(tornado.web.RequestHandler):
@@ -28,17 +36,48 @@ class LtiBridgeDeliveryReceiver(tornado.web.RequestHandler):
      "payload": "Msg's 'content' field"
     }
     
-    on port LTI_BRIDGE_DELIVERY_TEST_PORT
+    on port MY_DELIVERY_PORT
 
     '''
     
-    LTI_BRIDGE_DELIVERY_TEST_PORT = 7076
+    MY_DELIVERY_PORT = 7076
+    LTI_BRIDGE_SERVICE_PORT = 7075
+    LTI_BRIDGE_URL = 'https://%s:%s/schoolbus' % (socket.getfqdn(), LTI_BRIDGE_SERVICE_PORT)
+    MY_DELIVERY_URL = 'https://%s:%s/delivery' % (socket.getfqdn(), MY_DELIVERY_PORT)
+    CONTENT_LOCK_FILE_PATH_ROOT = os.path.join(os.path.dirname(__file__), 'delivery_content.txt')
+    DELIVERY_TEST_TOPIC = 'deliveryTest'    
+    TEST_SUBSCRIBE_DICT = {"ltiKey" : "ltiKey",\
+                           "ltiSecret" : "ltiSecret",\
+                           "action" : "subscribe",\
+                           "bus_topic" : DELIVERY_TEST_TOPIC,\
+                           "payload" : {\
+                		                 "delivery_url" : MY_DELIVERY_URL\
+                		               },\
+                           }    
+    TEST_UNSUBSCRIBE_DICT = {"ltiKey" : "ltiKey",\
+                           "ltiSecret" : "ltiSecret",\
+                           "action" : "unsubscribe",\
+                           "bus_topic" : DELIVERY_TEST_TOPIC,\
+                           "payload" : {\
+                		                 "delivery_url" : MY_DELIVERY_URL\
+                		               },\
+                           }    
+    
     
     def get(self):
+        '''
+        The HTTP GET msg will just return information about this server.
+        '''
         self.write("This is a delivery test server for the LTI-to-Schoolbus bridge.")
-        self.write("The business side is POST to HTTPS://<server>:%s/delivery" % LtiBridgeDeliveryReceiver.LTI_BRIDGE_DELIVERY_TEST_PORT)
+        self.write("The business side is POST to HTTPS://<server>:%s/delivery" % LtiBridgeDeliveryReceiver.LTI_BRIDGE_SERVICE_PORT)
     
     def post(self):
+        '''
+        Received a message from the lti_schoolbus_bridge. This msg
+        originated from the SchoolBus, where it was published by some
+        remote entity.
+        '''
+        
         postBodyForm = self.request.body
         try:
             # Turn POST body JSON into a dict:
@@ -47,9 +86,98 @@ class LtiBridgeDeliveryReceiver(tornado.web.RequestHandler):
             print('POST called with improper JSON: %s' % str(postBodyForm))            
             return
 
-        print(str(postBodyDict))
+        #print(str(postBodyDict))
+        MsgManager.get_instance().handle_delivered_msg(str(postBodyDict))
+          
+class MsgManager(object):
+    '''
+    Subscribes/unsubscribes from topics via POST msgs to the LTI bridge.
+    Also holds the handle_delivered_msg() that is invoked when a msg
+    arrives from the bus via the lti_schoolbus_bridge.
 
-    @classmethod  
+    This class could be folded into the LtiBridgeDeliveryReceiver. But 
+    I find this organization cleaner.
+    '''
+    
+    instance = None
+    # File prefix P for files P.lock and P.txt. P.lock will be
+    # used by delivery_rx_server.py to prevent a unittest 
+    # from reading the P.txt file before it is fully written.
+    # The delivery_rx_server writes any received messages
+    # into P.txt, removing P.lock after write is complete.
+    # P is CONTENT_LOCK_FILE_PATH_ROOT:
+    CONTENT_LOCK_FILE_PATH_ROOT = os.path.join(os.path.dirname(__file__), 'delivery_content_file')
+       
+       
+    @classmethod
+    def get_instance(cls):
+        '''
+        Singleton pattern.
+        '''
+        if MsgManager.instance is not None:
+            return MsgManager.instance
+        else:
+            MsgManager.instance = MsgManager()
+            return MsgManager.instance
+
+    def handle_delivered_msg(self, json_str):
+        '''
+        A message has arrived from the bus via the lti_schoolbus_bridge.
+        You can do anything you want here. But note that the 
+        bridge HTTP POST request is open until this method finishes.
+        That's because this method is called from the POST reception method.
+        To decouple the delivery HTTP connection from this handler,
+        make them both coroutines, or make this class a thread.
+        
+        In this example handler, which is used by the unittests, 
+        we write the arrived message into a file that the unittests
+        know about, and will then remove an associated lock file that
+        tells the unittest that a result was written.
+        
+        :param json_str: message content
+        :type json_str: string
+        '''
+        
+        # Assume msg originator has placed a lock file into the current dir.
+        # Write the received msg to an agree-upon .txt file:
+        with open(MsgManager.CONTENT_LOCK_FILE_PATH_ROOT + '.txt', 'w') as fd:
+            fd.write(json_str)
+        # Remove the lock file for unittests to know they can read the .txt file now:
+        os.remove(MsgManager.CONTENT_LOCK_FILE_PATH_ROOT + '.lock')
+                    
+    def subscribe_to_topic(self, topic):
+        '''
+        Subscribe to the topic that the unittests will
+        post to. But first ensure that no old deliver_content.txt
+        file is lying around. It will be created and
+        filled with some content when a message is received
+        into post().
+        
+        :param topic: topic to subscribe to
+        :type topic: string
+        '''
+        self.send_to_lti_bridge(LtiBridgeDeliveryReceiver.TEST_SUBSCRIBE_DICT)
+
+    def unsubscribe_from_topic(self, topic):
+        '''
+        Unsubscribe from the topic that the unittests will
+        post to.
+        
+        :param topic: topic to subscribe to
+        :type topic: string
+        '''
+        self.send_to_lti_bridge(LtiBridgeDeliveryReceiver.TEST_UNSUBSCRIBE_DICT)
+        
+    
+    def send_to_lti_bridge(self, data_dict):
+        
+        request = urllib2.Request(LtiBridgeDeliveryReceiver.LTI_BRIDGE_URL, 
+                                  data_dict, 
+                                  {'Content-Type': 'application/json'})
+        response = urllib2.urlopen(request, json.dumps(data_dict)) #@UnusedVariable
+        return True
+    
+
     def makeApp(self, init_parm_dict):
         '''
         Create the tornado application, making it 
@@ -68,8 +196,7 @@ class LtiBridgeDeliveryReceiver(tornado.web.RequestHandler):
         application = tornado.web.Application(handlers)
         return application
 
-    @classmethod
-    def guess_key_path(cls):
+    def guess_key_path(self):
         '''
         Check whether an SSL key file exists, and is readable
         at $HOME/.ssl/<fqdn>.key. If so, the full path is
@@ -89,8 +216,7 @@ class LtiBridgeDeliveryReceiver(tornado.web.RequestHandler):
         return keypath
 
 
-    @classmethod
-    def guess_cert_path(cls):
+    def guess_cert_path(self):
         '''
         Check whether an SSL cert file exists, and is readable.
         Will check three possibilities:
@@ -148,9 +274,11 @@ if __name__ == '__main__':
 
     args = parser.parse_args();
     
+    msg_manager = MsgManager.get_instance()
+    
     # Tornado application object (empty keyword parms dict):    
     
-    application = LtiBridgeDeliveryReceiver.makeApp({})
+    application = msg_manager.makeApp({})
     
     # We need an SSL capable HTTP server:
     # For configuration without a cert, add "cert_reqs"  : ssl.CERT_NONE
@@ -168,7 +296,7 @@ if __name__ == '__main__':
     try:
         if args.certfile is None:
             # Will throw IOError exception if not found:
-            args.certfile = LtiBridgeDeliveryReceiver.guess_cert_path()
+            args.certfile = msg_manager.guess_cert_path()
         else:
             # Was given cert path in CLI option. Check that
             # it's there and readable:
@@ -184,7 +312,7 @@ if __name__ == '__main__':
     try:
         if args.keyfile is None:
             # Will throw IOError exception if not found:
-            args.keyfile = LtiBridgeDeliveryReceiver.guess_key_path()
+            args.keyfile = msg_manager.guess_key_path()
         else:
             # Was given cert path in CLI option. Check that
             # it's there and readable:
@@ -222,18 +350,23 @@ if __name__ == '__main__':
                                                              "keyfile" : args.keyfile
     })
 
-    service_url  = 'https://%s:%s/delivery' % (fqdn, LtiBridgeDeliveryReceiver.LTI_BRIDGE_DELIVERY_TEST_PORT)
+    service_url  = 'https://%s:%s/delivery' % (fqdn, LtiBridgeDeliveryReceiver.MY_DELIVERY_PORT)
     
     print('Starting LTI-Schoolbus bridge test delivery receiver at %s' % service_url)
     
     # Run the app on its port:
     # Instead of application.listen, as in non-SSL
     # services, the http_server is told to listen:
-    #*****application.listen(LTISchoolbusBridge.LTI_BRIDGE_DELIVERY_TEST_PORT)
-    http_server.listen(LtiBridgeDeliveryReceiver.LTI_BRIDGE_DELIVERY_TEST_PORT)
+    #*****application.listen(LTISchoolbusBridge.MY_DELIVERY_TEST_PORT)
+    http_server.listen(LtiBridgeDeliveryReceiver.MY_DELIVERY_PORT)
+    
+    # Subscribe to the test topic:
+    msg_manager.subscribe_to_topic(LtiBridgeDeliveryReceiver.DELIVERY_TEST_TOPIC)
     try:
         tornado.ioloop.IOLoop.instance().start()
     except KeyboardInterrupt:
             print('Stopping LTI-Schoolbus bridge test delivery receiver.')
-            sys.exit()
-            
+    finally:
+        print('Unsubscribing from %s' % LtiBridgeDeliveryReceiver.DELIVERY_TEST_TOPIC)
+        msg_manager.unsubscribe_from_topic(LtiBridgeDeliveryReceiver.DELIVERY_TEST_TOPIC)
+        print('LTI-Schoolbus bridge test delivery receiver stopped.')
