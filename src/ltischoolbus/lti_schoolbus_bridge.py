@@ -219,8 +219,24 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         
         # Create or read existing JSON file with all
         # subscriptions:
-        self.lti_subscriptions = JsonFileDict(LTISchoolbusBridge.subscriptions_path)
-        self.lti_subscriptions.load()
+        try:
+            self.lti_subscriptions = JsonFileDict(LTISchoolbusBridge.subscriptions_path)
+            self.lti_subscriptions.load()
+        except (ValueError, IOError):
+            # The persistent-subscription file was absent,
+            # or contained non-JSON:
+            try:
+                with open(LTISchoolbusBridge.subscriptions_path, 'r') as fd:
+                    subscriptions_raw = fd.readlines()
+                if subscriptions_raw is not None and len(subscriptions_raw) > 0:
+                    self.logErr('Bad JSON in subscription file %s: %s' % (LTISchoolbusBridge.subscriptions_path,
+                                                                          str(subscriptions_raw)))
+            except Exception:
+                # Can't even read the subscription file:
+                self.logErr('Could not read subscription file %s' % LTISchoolbusBridge.subscriptions_path)
+            with open(LTISchoolbusBridge.subscriptions_path, 'w') as fd:
+                fd.write('{}')
+            self.lti_subscriptions = {}
         self.logInfo('Loaded existing subscriptions: %s' %\
                       str(self.lti_subscriptions) if len(self.lti_subscriptions) > 0 else 'No subscriptions on record.')
         
@@ -476,7 +492,10 @@ class LTISchoolbusBridge(tornado.web.RequestHandler):
         :type msg: str
         '''
         self.clear()
+        # Seems like newlines are bad after all:
+        msg = msg.replace('\n', '<newline>')
         self.set_status(status_code, reason=msg)
+        
 
         # The following, while simple, tries to put msg into the
         # HTTP header, where newlines are illegal. This limitation
